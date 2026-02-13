@@ -1,11 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { getFoodEntries, saveFoodEntries, getGoals, saveGoals } from "@/lib/storage";
+import { getFoodEntries, saveFoodEntries, getGoals, saveGoals, getCustomFoods, saveCustomFoods } from "@/lib/storage";
 import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
 import { generateId, todayString } from "@/lib/utils";
 import { FOOD_DATABASE } from "@/lib/foodDatabase";
-import { Plus, Trash2, Pencil, Check, X } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, X, Star } from "lucide-react";
 
 function ProgressBar({ current, goal, color }: { current: number; goal: number; color: string }) {
   const pct = Math.min((current / goal) * 100, 100);
@@ -34,7 +34,11 @@ export default function FoodPage() {
   const [meal, setMeal] = useState<FoodEntry["meal"]>("lunch");
 
   // Food search
-  const [searchResults, setSearchResults] = useState<FoodDatabaseItem[]>([]);
+  const [customFoods, setCustomFoods] = useState<FoodDatabaseItem[]>([]);
+  const [searchResults, setSearchResults] = useState<(FoodDatabaseItem & { isCustom?: boolean })[]>([]);
+  const [saveToDb, setSaveToDb] = useState(false);
+  const [serving, setServing] = useState("");
+  const [selectedFromDb, setSelectedFromDb] = useState(false);
 
   // Inline editable goals
   const [editingField, setEditingField] = useState<keyof MacroGoals | null>(null);
@@ -44,6 +48,7 @@ export default function FoodPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe localStorage load
     setEntries(getFoodEntries());
     setGoals(getGoals());
+    setCustomFoods(getCustomFoods());
   }, []);
 
   if (!goals) return null;
@@ -80,11 +85,31 @@ export default function FoodPage() {
     const updated = [...entries, entry];
     setEntries(updated);
     saveFoodEntries(updated);
+
+    // Save to custom foods database if toggled
+    if (saveToDb && !selectedFromDb) {
+      const customFood: FoodDatabaseItem = {
+        name: name.trim(),
+        calories: Number(calories) || 0,
+        protein: Number(protein) || 0,
+        carbs: Number(carbs) || 0,
+        fat: Number(fat) || 0,
+        serving: serving.trim() || "1 serving",
+        category: "custom",
+      };
+      const updatedCustom = [...customFoods, customFood];
+      setCustomFoods(updatedCustom);
+      saveCustomFoods(updatedCustom);
+    }
+
     setName("");
     setCalories("");
     setProtein("");
     setCarbs("");
     setFat("");
+    setServing("");
+    setSaveToDb(false);
+    setSelectedFromDb(false);
     setShowAdd(false);
   }
 
@@ -96,15 +121,19 @@ export default function FoodPage() {
 
   function handleFoodSearch(query: string) {
     setName(query);
+    setSelectedFromDb(false);
     if (query.trim().length < 2) {
       setSearchResults([]);
       return;
     }
     const q = query.toLowerCase();
-    const results = FOOD_DATABASE.filter((item) =>
-      item.name.toLowerCase().includes(q)
-    ).slice(0, 8);
-    setSearchResults(results);
+    const customResults = customFoods
+      .filter((item) => item.name.toLowerCase().includes(q))
+      .map((item) => ({ ...item, isCustom: true as const }));
+    const builtinResults = FOOD_DATABASE
+      .filter((item) => item.name.toLowerCase().includes(q))
+      .map((item) => ({ ...item, isCustom: false as const }));
+    setSearchResults([...customResults, ...builtinResults].slice(0, 8));
   }
 
   function selectFood(item: FoodDatabaseItem) {
@@ -114,6 +143,8 @@ export default function FoodPage() {
     setCarbs(String(item.carbs));
     setFat(String(item.fat));
     setSearchResults([]);
+    setSelectedFromDb(true);
+    setSaveToDb(false);
   }
 
   function startEditGoal(field: keyof MacroGoals) {
@@ -304,9 +335,12 @@ export default function FoodPage() {
                       onClick={() => selectFood(item)}
                       className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
                     >
-                      <div>
+                      <div className="flex items-center gap-1.5">
                         <span className="font-medium">{item.name}</span>
-                        <span className="text-foreground/30 ml-2 text-xs">{item.serving}</span>
+                        {item.isCustom && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-accent/15 text-accent">My Food</span>
+                        )}
+                        <span className="text-foreground/30 text-xs">{item.serving}</span>
                       </div>
                       <span className="text-foreground/40 text-xs">{item.calories} cal</span>
                     </button>
@@ -371,6 +405,32 @@ export default function FoodPage() {
                 />
               </div>
             </div>
+
+            {/* Save to My Foods toggle */}
+            {!selectedFromDb && name.trim() && (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => setSaveToDb(!saveToDb)}
+                  className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                    saveToDb
+                      ? "bg-accent/15 text-accent border border-accent/30"
+                      : "bg-background border border-border text-foreground/50 hover:text-foreground/70"
+                  }`}
+                >
+                  <Star size={14} className={saveToDb ? "fill-accent" : ""} />
+                  Save to My Foods
+                </button>
+                {saveToDb && (
+                  <input
+                    value={serving}
+                    onChange={(e) => setServing(e.target.value)}
+                    placeholder="Serving size (e.g. 1 cup, 100g)"
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
+                  />
+                )}
+              </div>
+            )}
 
             <button
               onClick={addEntry}

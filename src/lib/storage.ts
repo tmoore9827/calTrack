@@ -1,6 +1,6 @@
 "use client";
 
-import { FoodEntry, WeightEntry, WorkoutDay, MacroGoals, DEFAULT_GOALS, CardioEntry, UserSettings, DEFAULT_SETTINGS, WorkoutLog } from "./types";
+import { FoodEntry, FoodDatabaseItem, WeightEntry, WorkoutDay, MacroGoals, DEFAULT_GOALS, CardioEntry, UserSettings, DEFAULT_SETTINGS, WorkoutLog } from "./types";
 
 function get<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -78,4 +78,13 @@ export function getWorkoutLogs(): WorkoutLog[] {
 
 export function saveWorkoutLogs(logs: WorkoutLog[]) {
   set("caltrack_workout_logs", logs);
+}
+
+// Custom foods (user-saved foods added to the database)
+export function getCustomFoods(): FoodDatabaseItem[] {
+  return get<FoodDatabaseItem[]>("caltrack_custom_foods", []);
+}
+
+export function saveCustomFoods(foods: FoodDatabaseItem[]) {
+  set("caltrack_custom_foods", foods);
 }
