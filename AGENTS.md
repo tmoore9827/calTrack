@@ -11,7 +11,7 @@ src/
 ├── app/
 │   ├── layout.tsx            # Root layout, wraps all pages with Navigation
 │   ├── page.tsx              # Dashboard (workout notification, macro rings with inline editing, macro donut, weekly calorie bar chart, sprint PR, workout last/best summary)
-│   ├── food/page.tsx         # Food log with food database search and inline editable macro goals
+│   ├── food/page.tsx         # Food log with DB search, gram/calorie scaling, Create Meal, inline editable macro goals
 │   ├── weight/page.tsx       # Weight tracker with time range filter, weekly averages bar chart, BMI card
 │   ├── workouts/page.tsx     # Workout planner with completion flow, congrats popup, progressive overload
 │   ├── cardio/page.tsx       # Running-focused cardio tracker (light run, heavy run, sprint, jog) with pace/distance charts
@@ -21,21 +21,46 @@ src/
 │   └── BarbellViz.tsx        # Barbell plate loading visualization
 └── lib/
     ├── types.ts              # All TypeScript interfaces (FoodEntry, WeightEntry, Exercise, WorkoutDay, MacroGoals, CardioEntry, UserSettings, WorkoutLog, CompletedExercise, FoodDatabaseItem)
-    ├── storage.ts            # localStorage CRUD (caltrack_food, caltrack_weight, caltrack_workouts, caltrack_goals, caltrack_cardio, caltrack_settings, caltrack_workout_logs)
+    ├── storage.ts            # localStorage CRUD (caltrack_food, caltrack_weight, caltrack_workouts, caltrack_goals, caltrack_cardio, caltrack_settings, caltrack_workout_logs, caltrack_custom_foods)
     ├── utils.ts              # Helpers: generateId, todayString, formatDate, calculatePlates, calculatePace, calculateBMI, getBMICategory, getDateRangeStart
-    └── foodDatabase.ts       # Static array of ~120 common foods with macro data (FoodDatabaseItem[])
+    └── foodDatabase.ts       # Static array of ~140 common foods with macro data and servingGrams (FoodDatabaseItem[])
+e2e/
+├── food.spec.ts              # Playwright E2E tests for food page (search, scaling, Create Meal)
+└── navigation.spec.ts        # Playwright E2E tests for page navigation
+playwright.config.ts          # Playwright config (chromium + mobile, dev server auto-start)
 ```
 
 ## Commands
 
-| Command         | Purpose                          | Notes                                      |
-| --------------- | -------------------------------- | ------------------------------------------ |
-| `npm run dev`   | Start dev server on :3000        | Use this while iterating                   |
-| `npm run build` | Production build                 | Do NOT run during interactive agent sessions |
-| `npm start`     | Serve production build           | Requires `npm run build` first             |
-| `npm run lint`  | Run ESLint                       | Run before committing                      |
+| Command              | Purpose                          | Notes                                      |
+| -------------------- | -------------------------------- | ------------------------------------------ |
+| `npm run dev`        | Start dev server on :3000        | Use this while iterating                   |
+| `npm run build`      | Production build                 | Do NOT run during interactive agent sessions |
+| `npm start`          | Serve production build           | Requires `npm run build` first             |
+| `npm run lint`       | Run ESLint                       | Run before committing                      |
+| `npm run test:e2e`   | Run Playwright E2E tests         | Requires `npx playwright install` first    |
+| `npm run test:e2e:ui`| Run Playwright in interactive UI | Opens visual test runner                   |
 
 Always use `npm run dev` while iterating. Do not run production builds during agent sessions — it disables hot reload.
+
+## Testing
+
+Playwright is used for automated E2E front-end testing. Tests live in `e2e/`.
+
+### Setup
+```bash
+npx playwright install        # Install browser engines (one-time)
+npm run test:e2e              # Run all tests headless
+npm run test:e2e:ui           # Run with interactive UI
+npx playwright test --headed  # Run with visible browser
+```
+
+### Playwright MCP (AI-driven testing)
+For Claude Code integration, add the Playwright MCP server:
+```bash
+claude mcp add playwright -- npx @playwright/mcp@latest
+```
+This lets Claude directly control a browser to test the app via natural language.
 
 ## Coding standards
 
@@ -59,6 +84,7 @@ All data lives in localStorage under these keys:
 - `caltrack_cardio` — `CardioEntry[]` (id, date, type, distance, duration, notes)
 - `caltrack_settings` — `UserSettings` (heightFeet, heightInches)
 - `caltrack_workout_logs` — `WorkoutLog[]` (id, workoutDayId, workoutName, date, completed, exercises[])
+- `caltrack_custom_foods` — `FoodDatabaseItem[]` (user-saved custom foods for reuse in search)
 
 Dates use `YYYY-MM-DD` format. Meal types are `"breakfast" | "lunch" | "dinner" | "snack"`. Cardio types are `"light_run" | "heavy_run" | "sprint" | "jog"`.
 
@@ -77,6 +103,7 @@ Dark theme with green accent. Key color variables:
 
 - **Recharts** — used for weight progress chart, weekly averages bar chart, weekly calorie bar chart, macro donut pie chart, cardio distance/pace charts
 - **Lucide React** — icon library used across all pages
+- **Playwright** (devDependency) — E2E testing framework
 - No other runtime dependencies beyond Next.js and React
 
 ## Environment variables
@@ -98,7 +125,27 @@ None required. This app has zero external service dependencies.
 Edit CSS variables in `src/app/globals.css` under the `@theme` block.
 
 ### Using the food database
-The food database is a static array in `src/lib/foodDatabase.ts`. To add foods, add entries to the `FOOD_DATABASE` array with name, calories, protein, carbs, fat, serving, and category fields.
+The food database is a static array in `src/lib/foodDatabase.ts`. Each entry has: name, calories, protein, carbs, fat, serving, servingGrams, and category. The `servingGrams` field enables gram-based scaling in the UI.
+
+Categories: protein, legume, dairy, grain, fruit, vegetable, snack, beverage, meal, custom.
+
+To add foods, add entries to the `FOOD_DATABASE` array. Users can also save custom foods via the "Save to My Foods" button — these are stored in `caltrack_custom_foods` and appear first in search results with a "My Food" badge.
+
+### Food entry scaling (gram/calorie cycling)
+When a food is selected from the database, the user can toggle between three input modes:
+- **Serving**: enter number of servings (default: 1)
+- **Grams**: enter weight in grams, macros scale by `amount / servingGrams`
+- **Calories**: enter target calories, macros scale by `targetCal / baseCal`
+
+All macros auto-update in a live preview as the user types.
+
+### Create Meal (food composition)
+The "Meal" button opens a modal to combine multiple database foods into a single entry:
+1. Name the meal (e.g. "Chicken Rice Bowl")
+2. Search and add foods from the database
+3. Adjust each food's amount using serving/grams/calories toggle
+4. Running totals update live
+5. Optionally save to "My Foods" for reuse
 
 ### Workout completion flow
 1. User clicks "Complete Workout" on today's workout card
@@ -112,3 +159,9 @@ The food database is a static array in `src/lib/foodDatabase.ts`. To add foods, 
 - "Last" weight for an exercise = most recent WorkoutLog for that workoutDayId within 14 days
 - "Best" weight = all-time max for that exercise across all logs for that workoutDayId
 - Sprint PR card only tracks entries with type === "sprint"
+
+### Writing E2E tests
+1. Create a `.spec.ts` file in `e2e/`
+2. Import `{ test, expect } from "@playwright/test"`
+3. Use `page.goto("/route")` to navigate (baseURL is localhost:3000)
+4. Run with `npm run test:e2e`

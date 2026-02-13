@@ -5,7 +5,9 @@ import { getFoodEntries, saveFoodEntries, getGoals, saveGoals, getCustomFoods, s
 import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
 import { generateId, todayString } from "@/lib/utils";
 import { FOOD_DATABASE } from "@/lib/foodDatabase";
-import { Plus, Trash2, Pencil, Check, X, Star } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, X, Star, Layers } from "lucide-react";
+
+type InputMode = "serving" | "grams" | "calories";
 
 function ProgressBar({ current, goal, color }: { current: number; goal: number; color: string }) {
   const pct = Math.min((current / goal) * 100, 100);
@@ -17,6 +19,26 @@ function ProgressBar({ current, goal, color }: { current: number; goal: number; 
       />
     </div>
   );
+}
+
+function scaleFood(food: FoodDatabaseItem, amount: number, mode: InputMode) {
+  if (amount <= 0) return { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  const scale =
+    mode === "serving" ? amount
+    : mode === "grams" ? amount / food.servingGrams
+    : food.calories > 0 ? amount / food.calories : 0;
+  return {
+    calories: Math.round(food.calories * scale),
+    protein: Math.round(food.protein * scale * 10) / 10,
+    carbs: Math.round(food.carbs * scale * 10) / 10,
+    fat: Math.round(food.fat * scale * 10) / 10,
+  };
+}
+
+interface MealItem {
+  food: FoodDatabaseItem;
+  amount: number;
+  mode: InputMode;
 }
 
 export default function FoodPage() {
@@ -33,12 +55,23 @@ export default function FoodPage() {
   const [fat, setFat] = useState("");
   const [meal, setMeal] = useState<FoodEntry["meal"]>("lunch");
 
-  // Food search
+  // Food search & DB selection
   const [customFoods, setCustomFoods] = useState<FoodDatabaseItem[]>([]);
   const [searchResults, setSearchResults] = useState<(FoodDatabaseItem & { isCustom?: boolean })[]>([]);
   const [saveToDb, setSaveToDb] = useState(false);
-  const [serving, setServing] = useState("");
-  const [selectedFromDb, setSelectedFromDb] = useState(false);
+  const [servingLabel, setServingLabel] = useState("");
+
+  // Gram/calorie scaling
+  const [selectedFood, setSelectedFood] = useState<FoodDatabaseItem | null>(null);
+  const [inputMode, setInputMode] = useState<InputMode>("serving");
+  const [amount, setAmount] = useState("1");
+
+  // Create Meal
+  const [showCreateMeal, setShowCreateMeal] = useState(false);
+  const [mealItems, setMealItems] = useState<MealItem[]>([]);
+  const [mealName, setMealName] = useState("");
+  const [mealSearch, setMealSearch] = useState("");
+  const [mealSearchResults, setMealSearchResults] = useState<FoodDatabaseItem[]>([]);
 
   // Inline editable goals
   const [editingField, setEditingField] = useState<keyof MacroGoals | null>(null);
@@ -70,15 +103,24 @@ export default function FoodPage() {
     { calories: 0, protein: 0, carbs: 0, fat: 0 }
   );
 
+  // Computed scaled macros when a DB food is selected
+  const scaled = selectedFood ? scaleFood(selectedFood, Number(amount) || 0, inputMode) : null;
+
   function addEntry() {
     if (!name.trim()) return;
-    const entry: FoodEntry = {
-      id: generateId(),
-      name: name.trim(),
+    const macros = scaled || {
       calories: Number(calories) || 0,
       protein: Number(protein) || 0,
       carbs: Number(carbs) || 0,
       fat: Number(fat) || 0,
+    };
+    const entry: FoodEntry = {
+      id: generateId(),
+      name: name.trim(),
+      calories: macros.calories,
+      protein: Math.round(macros.protein),
+      carbs: Math.round(macros.carbs),
+      fat: Math.round(macros.fat),
       date: selectedDate,
       meal,
     };
@@ -87,14 +129,15 @@ export default function FoodPage() {
     saveFoodEntries(updated);
 
     // Save to custom foods database if toggled
-    if (saveToDb && !selectedFromDb) {
+    if (saveToDb && !selectedFood) {
       const customFood: FoodDatabaseItem = {
         name: name.trim(),
         calories: Number(calories) || 0,
         protein: Number(protein) || 0,
         carbs: Number(carbs) || 0,
         fat: Number(fat) || 0,
-        serving: serving.trim() || "1 serving",
+        serving: servingLabel.trim() || "1 serving",
+        servingGrams: 100,
         category: "custom",
       };
       const updatedCustom = [...customFoods, customFood];
@@ -102,15 +145,22 @@ export default function FoodPage() {
       saveCustomFoods(updatedCustom);
     }
 
+    resetForm();
+    setShowAdd(false);
+  }
+
+  function resetForm() {
     setName("");
     setCalories("");
     setProtein("");
     setCarbs("");
     setFat("");
-    setServing("");
+    setServingLabel("");
     setSaveToDb(false);
-    setSelectedFromDb(false);
-    setShowAdd(false);
+    setSelectedFood(null);
+    setInputMode("serving");
+    setAmount("1");
+    setSearchResults([]);
   }
 
   function deleteEntry(id: string) {
@@ -121,7 +171,7 @@ export default function FoodPage() {
 
   function handleFoodSearch(query: string) {
     setName(query);
-    setSelectedFromDb(false);
+    setSelectedFood(null);
     if (query.trim().length < 2) {
       setSearchResults([]);
       return;
@@ -138,13 +188,125 @@ export default function FoodPage() {
 
   function selectFood(item: FoodDatabaseItem) {
     setName(item.name);
+    setSelectedFood(item);
+    setInputMode("serving");
+    setAmount("1");
     setCalories(String(item.calories));
     setProtein(String(item.protein));
     setCarbs(String(item.carbs));
     setFat(String(item.fat));
     setSearchResults([]);
-    setSelectedFromDb(true);
     setSaveToDb(false);
+  }
+
+  function handleAmountChange(val: string) {
+    setAmount(val);
+    if (selectedFood) {
+      const s = scaleFood(selectedFood, Number(val) || 0, inputMode);
+      setCalories(String(s.calories));
+      setProtein(String(s.protein));
+      setCarbs(String(s.carbs));
+      setFat(String(s.fat));
+    }
+  }
+
+  function handleModeChange(mode: InputMode) {
+    setInputMode(mode);
+    if (selectedFood) {
+      // Reset amount to a sensible default for the new mode
+      const defaults = { serving: "1", grams: String(selectedFood.servingGrams), calories: String(selectedFood.calories) };
+      setAmount(defaults[mode]);
+      const s = scaleFood(selectedFood, Number(defaults[mode]) || 0, mode);
+      setCalories(String(s.calories));
+      setProtein(String(s.protein));
+      setCarbs(String(s.carbs));
+      setFat(String(s.fat));
+    }
+  }
+
+  // Create Meal functions
+  function handleMealSearch(query: string) {
+    setMealSearch(query);
+    if (query.trim().length < 2) {
+      setMealSearchResults([]);
+      return;
+    }
+    const q = query.toLowerCase();
+    const results = [...customFoods, ...FOOD_DATABASE]
+      .filter((item) => item.name.toLowerCase().includes(q))
+      .slice(0, 6);
+    setMealSearchResults(results);
+  }
+
+  function addToMeal(food: FoodDatabaseItem) {
+    setMealItems([...mealItems, { food, amount: 1, mode: "serving" }]);
+    setMealSearch("");
+    setMealSearchResults([]);
+  }
+
+  function updateMealItem(index: number, amount: number, mode: InputMode) {
+    const updated = [...mealItems];
+    updated[index] = { ...updated[index], amount, mode };
+    setMealItems(updated);
+  }
+
+  function removeMealItem(index: number) {
+    setMealItems(mealItems.filter((_, i) => i !== index));
+  }
+
+  function getMealTotals() {
+    return mealItems.reduce(
+      (acc, item) => {
+        const s = scaleFood(item.food, item.amount, item.mode);
+        return {
+          calories: acc.calories + s.calories,
+          protein: acc.protein + s.protein,
+          carbs: acc.carbs + s.carbs,
+          fat: acc.fat + s.fat,
+        };
+      },
+      { calories: 0, protein: 0, carbs: 0, fat: 0 }
+    );
+  }
+
+  function saveMeal() {
+    if (!mealName.trim() || mealItems.length === 0) return;
+    const totals = getMealTotals();
+    const entry: FoodEntry = {
+      id: generateId(),
+      name: mealName.trim(),
+      calories: Math.round(totals.calories),
+      protein: Math.round(totals.protein),
+      carbs: Math.round(totals.carbs),
+      fat: Math.round(totals.fat),
+      date: selectedDate,
+      meal,
+    };
+    const updated = [...entries, entry];
+    setEntries(updated);
+    saveFoodEntries(updated);
+
+    // Also save as custom food for reuse
+    if (saveToDb) {
+      const customFood: FoodDatabaseItem = {
+        name: mealName.trim(),
+        calories: Math.round(totals.calories),
+        protein: Math.round(totals.protein),
+        carbs: Math.round(totals.carbs),
+        fat: Math.round(totals.fat),
+        serving: "1 meal",
+        servingGrams: 100,
+        category: "custom",
+      };
+      const updatedCustom = [...customFoods, customFood];
+      setCustomFoods(updatedCustom);
+      saveCustomFoods(updatedCustom);
+    }
+
+    setMealName("");
+    setMealItems([]);
+    setSaveToDb(false);
+    setShowCreateMeal(false);
   }
 
   function startEditGoal(field: keyof MacroGoals) {
@@ -165,6 +327,8 @@ export default function FoodPage() {
   const dates = [...new Set(entries.map((e) => e.date))].sort().reverse();
   if (!dates.includes(selectedDate)) dates.unshift(selectedDate);
 
+  const mealTotals = showCreateMeal ? getMealTotals() : null;
+
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
@@ -172,12 +336,20 @@ export default function FoodPage() {
           <h1 className="text-2xl font-bold">Food Log</h1>
           <p className="text-foreground/40 text-sm mt-1">Track your daily nutrition</p>
         </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
-        >
-          <Plus size={16} /> Add
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowCreateMeal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card border border-border text-foreground/60 font-medium text-sm hover:text-foreground transition-colors"
+          >
+            <Layers size={14} /> Meal
+          </button>
+          <button
+            onClick={() => setShowAdd(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
+          >
+            <Plus size={16} /> Add
+          </button>
+        </div>
       </div>
 
       {/* Date picker */}
@@ -313,7 +485,7 @@ export default function FoodPage() {
             <div className="w-10 h-1 bg-foreground/20 rounded-full mx-auto mb-2 md:hidden" />
             <div className="flex justify-between items-center">
               <h2 className="text-lg font-bold">Add Food</h2>
-              <button onClick={() => setShowAdd(false)} className="text-foreground/40 hover:text-foreground">
+              <button onClick={() => { resetForm(); setShowAdd(false); }} className="text-foreground/40 hover:text-foreground">
                 <X size={20} />
               </button>
             </div>
@@ -349,6 +521,56 @@ export default function FoodPage() {
               )}
             </div>
 
+            {/* Amount mode toggle - shows when a DB food is selected */}
+            {selectedFood && (
+              <div className="space-y-3">
+                <div className="flex gap-1.5">
+                  {(["serving", "grams", "calories"] as InputMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => handleModeChange(mode)}
+                      className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
+                        inputMode === mode ? "bg-accent/20 text-accent" : "bg-background border border-border text-foreground/50"
+                      }`}
+                    >
+                      {mode === "serving" ? `Serving (${selectedFood.serving})` : mode === "grams" ? "Grams" : "Calories"}
+                    </button>
+                  ))}
+                </div>
+                <div>
+                  <label className="text-xs text-foreground/40 block mb-1">
+                    {inputMode === "serving" ? "Number of servings" : inputMode === "grams" ? "Weight in grams" : "Target calories"}
+                  </label>
+                  <input
+                    type="number"
+                    step={inputMode === "serving" ? "0.25" : "1"}
+                    value={amount}
+                    onChange={(e) => handleAmountChange(e.target.value)}
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
+                  />
+                </div>
+                {/* Live macro preview */}
+                <div className="bg-background rounded-lg p-3 grid grid-cols-4 gap-2 text-center">
+                  <div>
+                    <span className="text-lg font-bold text-calories">{scaled?.calories || 0}</span>
+                    <p className="text-[10px] text-foreground/40">cal</p>
+                  </div>
+                  <div>
+                    <span className="text-lg font-bold text-protein">{scaled?.protein || 0}</span>
+                    <p className="text-[10px] text-foreground/40">protein</p>
+                  </div>
+                  <div>
+                    <span className="text-lg font-bold text-carbs">{scaled?.carbs || 0}</span>
+                    <p className="text-[10px] text-foreground/40">carbs</p>
+                  </div>
+                  <div>
+                    <span className="text-lg font-bold text-fat">{scaled?.fat || 0}</span>
+                    <p className="text-[10px] text-foreground/40">fat</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-2">
               {(["breakfast", "lunch", "dinner", "snack"] as const).map((m) => (
                 <button
@@ -363,51 +585,54 @@ export default function FoodPage() {
               ))}
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Calories</label>
-                <input
-                  type="number"
-                  value={calories}
-                  onChange={(e) => setCalories(e.target.value)}
-                  placeholder="0"
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
-                />
+            {/* Manual macro inputs - only when no DB food selected */}
+            {!selectedFood && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-foreground/40 block mb-1">Calories</label>
+                  <input
+                    type="number"
+                    value={calories}
+                    onChange={(e) => setCalories(e.target.value)}
+                    placeholder="0"
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-foreground/40 block mb-1">Protein (g)</label>
+                  <input
+                    type="number"
+                    value={protein}
+                    onChange={(e) => setProtein(e.target.value)}
+                    placeholder="0"
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-foreground/40 block mb-1">Carbs (g)</label>
+                  <input
+                    type="number"
+                    value={carbs}
+                    onChange={(e) => setCarbs(e.target.value)}
+                    placeholder="0"
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-foreground/40 block mb-1">Fat (g)</label>
+                  <input
+                    type="number"
+                    value={fat}
+                    onChange={(e) => setFat(e.target.value)}
+                    placeholder="0"
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Protein (g)</label>
-                <input
-                  type="number"
-                  value={protein}
-                  onChange={(e) => setProtein(e.target.value)}
-                  placeholder="0"
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Carbs (g)</label>
-                <input
-                  type="number"
-                  value={carbs}
-                  onChange={(e) => setCarbs(e.target.value)}
-                  placeholder="0"
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Fat (g)</label>
-                <input
-                  type="number"
-                  value={fat}
-                  onChange={(e) => setFat(e.target.value)}
-                  placeholder="0"
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-            </div>
+            )}
 
-            {/* Save to My Foods toggle */}
-            {!selectedFromDb && name.trim() && (
+            {/* Save to My Foods toggle - only for custom entries */}
+            {!selectedFood && name.trim() && (
               <div className="space-y-2">
                 <button
                   type="button"
@@ -423,8 +648,8 @@ export default function FoodPage() {
                 </button>
                 {saveToDb && (
                   <input
-                    value={serving}
-                    onChange={(e) => setServing(e.target.value)}
+                    value={servingLabel}
+                    onChange={(e) => setServingLabel(e.target.value)}
                     placeholder="Serving size (e.g. 1 cup, 100g)"
                     className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm"
                   />
@@ -438,6 +663,167 @@ export default function FoodPage() {
               className="w-full py-2.5 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim disabled:opacity-30 transition-colors"
             >
               Add Entry
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Create Meal modal */}
+      {showCreateMeal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-4">
+          <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="w-10 h-1 bg-foreground/20 rounded-full mx-auto mb-2 md:hidden" />
+            <div className="flex justify-between items-center">
+              <h2 className="text-lg font-bold">Create Meal</h2>
+              <button onClick={() => { setShowCreateMeal(false); setMealItems([]); setMealName(""); setMealSearch(""); setSaveToDb(false); }} className="text-foreground/40 hover:text-foreground">
+                <X size={20} />
+              </button>
+            </div>
+
+            <input
+              value={mealName}
+              onChange={(e) => setMealName(e.target.value)}
+              placeholder="Meal name (e.g. Chicken Rice Bowl)"
+              className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
+            />
+
+            {/* Search to add foods */}
+            <div className="relative">
+              <input
+                value={mealSearch}
+                onChange={(e) => handleMealSearch(e.target.value)}
+                placeholder="Search food to add..."
+                className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
+              />
+              {mealSearchResults.length > 0 && (
+                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-40 overflow-y-auto z-10">
+                  {mealSearchResults.map((item, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => addToMeal(item)}
+                      className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
+                    >
+                      <span className="font-medium">{item.name}</span>
+                      <span className="text-foreground/40 text-xs">{item.calories} cal / {item.serving}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Meal items list */}
+            {mealItems.length > 0 && (
+              <div className="space-y-2">
+                {mealItems.map((item, idx) => {
+                  const itemMacros = scaleFood(item.food, item.amount, item.mode);
+                  return (
+                    <div key={idx} className="bg-background rounded-lg p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{item.food.name}</span>
+                        <button onClick={() => removeMealItem(idx)} className="text-foreground/30 hover:text-danger">
+                          <X size={14} />
+                        </button>
+                      </div>
+                      <div className="flex gap-2 items-center">
+                        <input
+                          type="number"
+                          step={item.mode === "serving" ? "0.25" : "1"}
+                          value={item.amount}
+                          onChange={(e) => updateMealItem(idx, Number(e.target.value) || 0, item.mode)}
+                          className="w-20 bg-card border border-border rounded px-2 py-1 text-xs"
+                        />
+                        <div className="flex gap-1">
+                          {(["serving", "grams", "calories"] as InputMode[]).map((mode) => (
+                            <button
+                              key={mode}
+                              onClick={() => {
+                                const defaults: Record<InputMode, number> = {
+                                  serving: 1,
+                                  grams: item.food.servingGrams,
+                                  calories: item.food.calories,
+                                };
+                                updateMealItem(idx, defaults[mode], mode);
+                              }}
+                              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                                item.mode === mode ? "bg-accent/20 text-accent" : "text-foreground/30 hover:text-foreground/50"
+                              }`}
+                            >
+                              {mode === "serving" ? "srv" : mode === "grams" ? "g" : "cal"}
+                            </button>
+                          ))}
+                        </div>
+                        <span className="text-xs text-foreground/40 ml-auto">{itemMacros.calories} cal</span>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Meal totals */}
+                {mealTotals && (
+                  <div className="bg-accent/10 rounded-lg p-3 grid grid-cols-4 gap-2 text-center">
+                    <div>
+                      <span className="text-lg font-bold text-calories">{Math.round(mealTotals.calories)}</span>
+                      <p className="text-[10px] text-foreground/40">cal</p>
+                    </div>
+                    <div>
+                      <span className="text-lg font-bold text-protein">{Math.round(mealTotals.protein)}</span>
+                      <p className="text-[10px] text-foreground/40">protein</p>
+                    </div>
+                    <div>
+                      <span className="text-lg font-bold text-carbs">{Math.round(mealTotals.carbs)}</span>
+                      <p className="text-[10px] text-foreground/40">carbs</p>
+                    </div>
+                    <div>
+                      <span className="text-lg font-bold text-fat">{Math.round(mealTotals.fat)}</span>
+                      <p className="text-[10px] text-foreground/40">fat</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {mealItems.length === 0 && (
+              <div className="text-center py-6 text-foreground/30 text-sm">
+                Search and add foods to build your meal
+              </div>
+            )}
+
+            {/* Meal type selector */}
+            <div className="flex gap-2">
+              {(["breakfast", "lunch", "dinner", "snack"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMeal(m)}
+                  className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
+                    meal === m ? "bg-accent/20 text-accent" : "bg-background border border-border text-foreground/50"
+                  }`}
+                >
+                  {MEAL_LABELS[m]}
+                </button>
+              ))}
+            </div>
+
+            {/* Save to My Foods */}
+            <button
+              type="button"
+              onClick={() => setSaveToDb(!saveToDb)}
+              className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                saveToDb
+                  ? "bg-accent/15 text-accent border border-accent/30"
+                  : "bg-background border border-border text-foreground/50 hover:text-foreground/70"
+              }`}
+            >
+              <Star size={14} className={saveToDb ? "fill-accent" : ""} />
+              Save to My Foods
+            </button>
+
+            <button
+              onClick={saveMeal}
+              disabled={!mealName.trim() || mealItems.length === 0}
+              className="w-full py-2.5 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim disabled:opacity-30 transition-colors"
+            >
+              Add Meal
             </button>
           </div>
         </div>

@@ -61,6 +61,7 @@ export interface FoodDatabaseItem {
   carbs: number;
   fat: number;
   serving: string;
+  servingGrams: number; // gram weight of one serving, for scaling
   category: string;
 }
 
