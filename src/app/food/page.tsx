@@ -2,15 +2,27 @@
 
 import { useState, useEffect } from "react";
 import { getFoodEntries, saveFoodEntries, getGoals, saveGoals } from "@/lib/storage";
-import { FoodEntry, MacroGoals, MEAL_LABELS } from "@/lib/types";
-import { generateId, todayString, formatDate } from "@/lib/utils";
-import { Plus, Trash2, Settings2, X } from "lucide-react";
+import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
+import { generateId, todayString } from "@/lib/utils";
+import { FOOD_DATABASE } from "@/lib/foodDatabase";
+import { Plus, Trash2, Pencil, Check, X } from "lucide-react";
+
+function ProgressBar({ current, goal, color }: { current: number; goal: number; color: string }) {
+  const pct = Math.min((current / goal) * 100, 100);
+  return (
+    <div className="h-2 bg-border rounded-full overflow-hidden">
+      <div
+        className="h-full rounded-full transition-all duration-300"
+        style={{ width: `${pct}%`, backgroundColor: color }}
+      />
+    </div>
+  );
+}
 
 export default function FoodPage() {
   const [entries, setEntries] = useState<FoodEntry[]>([]);
   const [goals, setGoals] = useState<MacroGoals | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [showGoals, setShowGoals] = useState(false);
   const [selectedDate, setSelectedDate] = useState(todayString());
 
   // Form state
@@ -21,20 +33,17 @@ export default function FoodPage() {
   const [fat, setFat] = useState("");
   const [meal, setMeal] = useState<FoodEntry["meal"]>("lunch");
 
-  // Goal form
-  const [gCal, setGCal] = useState("");
-  const [gPro, setGPro] = useState("");
-  const [gCarb, setGCarb] = useState("");
-  const [gFat, setGFat] = useState("");
+  // Food search
+  const [searchResults, setSearchResults] = useState<FoodDatabaseItem[]>([]);
+
+  // Inline editable goals
+  const [editingField, setEditingField] = useState<keyof MacroGoals | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe localStorage load
     setEntries(getFoodEntries());
-    const g = getGoals();
-    setGoals(g);
-    setGCal(String(g.calories));
-    setGPro(String(g.protein));
-    setGCarb(String(g.carbs));
-    setGFat(String(g.fat));
+    setGoals(getGoals());
   }, []);
 
   if (!goals) return null;
@@ -85,28 +94,40 @@ export default function FoodPage() {
     saveFoodEntries(updated);
   }
 
-  function saveGoalForm() {
-    const updated: MacroGoals = {
-      calories: Number(gCal) || 2000,
-      protein: Number(gPro) || 150,
-      carbs: Number(gCarb) || 250,
-      fat: Number(gFat) || 65,
-    };
-    setGoals(updated);
-    saveGoals(updated);
-    setShowGoals(false);
+  function handleFoodSearch(query: string) {
+    setName(query);
+    if (query.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    const q = query.toLowerCase();
+    const results = FOOD_DATABASE.filter((item) =>
+      item.name.toLowerCase().includes(q)
+    ).slice(0, 8);
+    setSearchResults(results);
   }
 
-  function ProgressBar({ current, goal, color }: { current: number; goal: number; color: string }) {
-    const pct = Math.min((current / goal) * 100, 100);
-    return (
-      <div className="h-2 bg-border rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-300"
-          style={{ width: `${pct}%`, backgroundColor: color }}
-        />
-      </div>
-    );
+  function selectFood(item: FoodDatabaseItem) {
+    setName(item.name);
+    setCalories(String(item.calories));
+    setProtein(String(item.protein));
+    setCarbs(String(item.carbs));
+    setFat(String(item.fat));
+    setSearchResults([]);
+  }
+
+  function startEditGoal(field: keyof MacroGoals) {
+    if (!goals) return;
+    setEditingField(field);
+    setEditValue(String(goals[field]));
+  }
+
+  function saveEditGoal() {
+    if (!goals || !editingField) return;
+    const updated = { ...goals, [editingField]: Number(editValue) || goals[editingField] };
+    setGoals(updated);
+    saveGoals(updated);
+    setEditingField(null);
   }
 
   // Get unique dates for navigation
@@ -120,20 +141,12 @@ export default function FoodPage() {
           <h1 className="text-2xl font-bold">Food Log</h1>
           <p className="text-foreground/40 text-sm mt-1">Track your daily nutrition</p>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setShowGoals(true)}
-            className="p-2 rounded-lg bg-card border border-border hover:bg-card-hover transition-colors"
-          >
-            <Settings2 size={18} />
-          </button>
-          <button
-            onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
-          >
-            <Plus size={16} /> Add
-          </button>
-        </div>
+        <button
+          onClick={() => setShowAdd(true)}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
+        >
+          <Plus size={16} /> Add
+        </button>
       </div>
 
       {/* Date picker */}
@@ -156,34 +169,67 @@ export default function FoodPage() {
 
       {/* Macro summary */}
       <div className="bg-card rounded-2xl border border-border p-5 space-y-3">
-        <div className="flex justify-between text-sm">
+        <div className="flex justify-between items-center text-sm">
           <span className="text-foreground/50">Calories</span>
-          <span><span className="font-bold text-calories">{totals.calories}</span> / {goals.calories}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="font-bold text-calories">{totals.calories}</span>
+            <span className="text-foreground/40">/</span>
+            {editingField === "calories" ? (
+              <form onSubmit={(e) => { e.preventDefault(); saveEditGoal(); }} className="flex items-center gap-1">
+                <input
+                  type="number"
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={saveEditGoal}
+                  className="bg-background border border-accent/30 rounded px-1.5 py-0.5 text-sm w-16 text-right"
+                  autoFocus
+                />
+                <button type="submit" className="text-accent"><Check size={12} /></button>
+              </form>
+            ) : (
+              <button onClick={() => startEditGoal("calories")} className="flex items-center gap-1 text-foreground/50 hover:text-foreground group">
+                <span>{goals.calories}</span>
+                <Pencil size={10} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+              </button>
+            )}
+          </div>
         </div>
         <ProgressBar current={totals.calories} goal={goals.calories} color="var(--calories)" />
 
         <div className="grid grid-cols-3 gap-4 pt-2">
-          <div className="space-y-1.5">
-            <div className="flex justify-between text-xs">
-              <span className="text-foreground/50">Protein</span>
-              <span className="text-protein font-medium">{totals.protein}g</span>
-            </div>
-            <ProgressBar current={totals.protein} goal={goals.protein} color="var(--protein)" />
-          </div>
-          <div className="space-y-1.5">
-            <div className="flex justify-between text-xs">
-              <span className="text-foreground/50">Carbs</span>
-              <span className="text-carbs font-medium">{totals.carbs}g</span>
-            </div>
-            <ProgressBar current={totals.carbs} goal={goals.carbs} color="var(--carbs)" />
-          </div>
-          <div className="space-y-1.5">
-            <div className="flex justify-between text-xs">
-              <span className="text-foreground/50">Fat</span>
-              <span className="text-fat font-medium">{totals.fat}g</span>
-            </div>
-            <ProgressBar current={totals.fat} goal={goals.fat} color="var(--fat)" />
-          </div>
+          {(["protein", "carbs", "fat"] as const).map((macro) => {
+            const colorClass = macro === "protein" ? "text-protein" : macro === "carbs" ? "text-carbs" : "text-fat";
+            const colorVar = macro === "protein" ? "var(--protein)" : macro === "carbs" ? "var(--carbs)" : "var(--fat)";
+            return (
+              <div key={macro} className="space-y-1.5">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-foreground/50 capitalize">{macro}</span>
+                  <span className={`${colorClass} font-medium`}>{totals[macro]}g</span>
+                </div>
+                <ProgressBar current={totals[macro]} goal={goals[macro]} color={colorVar} />
+                <div className="flex justify-end">
+                  {editingField === macro ? (
+                    <form onSubmit={(e) => { e.preventDefault(); saveEditGoal(); }} className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        onBlur={saveEditGoal}
+                        className="bg-background border border-accent/30 rounded px-1 py-0.5 text-[10px] w-12 text-right"
+                        autoFocus
+                      />
+                      <button type="submit" className="text-accent"><Check size={10} /></button>
+                    </form>
+                  ) : (
+                    <button onClick={() => startEditGoal(macro)} className="flex items-center gap-0.5 text-[10px] text-foreground/30 hover:text-foreground/60 group">
+                      <span>/ {goals[macro]}g</span>
+                      <Pencil size={8} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -231,8 +277,9 @@ export default function FoodPage() {
 
       {/* Add food modal */}
       {showAdd && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center z-50 p-4">
-          <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-4">
+          <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="w-10 h-1 bg-foreground/20 rounded-full mx-auto mb-2 md:hidden" />
             <div className="flex justify-between items-center">
               <h2 className="text-lg font-bold">Add Food</h2>
               <button onClick={() => setShowAdd(false)} className="text-foreground/40 hover:text-foreground">
@@ -240,13 +287,33 @@ export default function FoodPage() {
               </button>
             </div>
 
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Food name"
-              className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
-              autoFocus
-            />
+            <div className="relative">
+              <input
+                value={name}
+                onChange={(e) => handleFoodSearch(e.target.value)}
+                placeholder="Search food or type custom..."
+                className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
+                autoFocus
+              />
+              {searchResults.length > 0 && (
+                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-48 overflow-y-auto z-10">
+                  {searchResults.map((item, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => selectFood(item)}
+                      className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
+                    >
+                      <div>
+                        <span className="font-medium">{item.name}</span>
+                        <span className="text-foreground/30 ml-2 text-xs">{item.serving}</span>
+                      </div>
+                      <span className="text-foreground/40 text-xs">{item.calories} cal</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div className="flex gap-2">
               {(["breakfast", "lunch", "dinner", "snack"] as const).map((m) => (
@@ -316,45 +383,6 @@ export default function FoodPage() {
         </div>
       )}
 
-      {/* Goals modal */}
-      {showGoals && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center z-50 p-4">
-          <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4">
-            <div className="flex justify-between items-center">
-              <h2 className="text-lg font-bold">Daily Goals</h2>
-              <button onClick={() => setShowGoals(false)} className="text-foreground/40 hover:text-foreground">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Calories</label>
-                <input type="number" value={gCal} onChange={(e) => setGCal(e.target.value)} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" />
-              </div>
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Protein (g)</label>
-                <input type="number" value={gPro} onChange={(e) => setGPro(e.target.value)} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" />
-              </div>
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Carbs (g)</label>
-                <input type="number" value={gCarb} onChange={(e) => setGCarb(e.target.value)} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" />
-              </div>
-              <div>
-                <label className="text-xs text-foreground/40 block mb-1">Fat (g)</label>
-                <input type="number" value={gFat} onChange={(e) => setGFat(e.target.value)} className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" />
-              </div>
-            </div>
-
-            <button
-              onClick={saveGoalForm}
-              className="w-full py-2.5 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
-            >
-              Save Goals
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -52,3 +52,60 @@ export const MEAL_LABELS: Record<FoodEntry["meal"], string> = {
   dinner: "Dinner",
   snack: "Snack",
 };
+
+// Food database item (static lookup, no id)
+export interface FoodDatabaseItem {
+  name: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  serving: string;
+  category: string;
+}
+
+// Cardio/Running entry
+export interface CardioEntry {
+  id: string;
+  date: string; // YYYY-MM-DD
+  type: "light_run" | "heavy_run" | "sprint" | "jog";
+  distance: number; // in miles
+  duration: number; // in minutes
+  notes: string;
+}
+
+export const CARDIO_TYPE_LABELS: Record<CardioEntry["type"], string> = {
+  light_run: "Light Run",
+  heavy_run: "Heavy Run",
+  sprint: "Sprint",
+  jog: "Jog",
+};
+
+// User settings (height for BMI)
+export interface UserSettings {
+  heightFeet: number;
+  heightInches: number;
+}
+
+export const DEFAULT_SETTINGS: UserSettings = {
+  heightFeet: 5,
+  heightInches: 10,
+};
+
+// Workout completion tracking
+export interface CompletedExercise {
+  exerciseId: string;
+  name: string;
+  sets: number;
+  reps: number;
+  weight: number;
+}
+
+export interface WorkoutLog {
+  id: string;
+  workoutDayId: string;
+  workoutName: string;
+  date: string; // YYYY-MM-DD
+  completed: boolean;
+  exercises: CompletedExercise[];
+}

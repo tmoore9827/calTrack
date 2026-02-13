@@ -1,6 +1,6 @@
 "use client";
 
-import { FoodEntry, WeightEntry, WorkoutDay, MacroGoals, DEFAULT_GOALS } from "./types";
+import { FoodEntry, WeightEntry, WorkoutDay, MacroGoals, DEFAULT_GOALS, CardioEntry, UserSettings, DEFAULT_SETTINGS, WorkoutLog } from "./types";
 
 function get<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -51,4 +51,31 @@ export function getGoals(): MacroGoals {
 
 export function saveGoals(goals: MacroGoals) {
   set("caltrack_goals", goals);
+}
+
+// Cardio entries
+export function getCardioEntries(): CardioEntry[] {
+  return get<CardioEntry[]>("caltrack_cardio", []);
+}
+
+export function saveCardioEntries(entries: CardioEntry[]) {
+  set("caltrack_cardio", entries);
+}
+
+// User settings
+export function getUserSettings(): UserSettings {
+  return get<UserSettings>("caltrack_settings", DEFAULT_SETTINGS);
+}
+
+export function saveUserSettings(settings: UserSettings) {
+  set("caltrack_settings", settings);
+}
+
+// Workout logs
+export function getWorkoutLogs(): WorkoutLog[] {
+  return get<WorkoutLog[]>("caltrack_workout_logs", []);
+}
+
+export function saveWorkoutLogs(logs: WorkoutLog[]) {
+  set("caltrack_workout_logs", logs);
 }

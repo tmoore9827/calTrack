@@ -21,8 +21,39 @@ export interface PlateBreakdown {
   remainder: number;
 }
 
+export function calculatePace(distance: number, duration: number): string {
+  if (distance <= 0) return "--:--";
+  const paceMinutes = duration / distance;
+  const mins = Math.floor(paceMinutes);
+  const secs = Math.round((paceMinutes - mins) * 60);
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+export function calculateBMI(weightLbs: number, heightFeet: number, heightInches: number): number {
+  const totalInches = heightFeet * 12 + heightInches;
+  if (totalInches <= 0) return 0;
+  return (weightLbs / (totalInches * totalInches)) * 703;
+}
+
+export function getBMICategory(bmi: number): string {
+  if (bmi < 18.5) return "Underweight";
+  if (bmi < 25) return "Normal";
+  if (bmi < 30) return "Overweight";
+  return "Obese";
+}
+
+export function getDateRangeStart(range: "1W" | "1M" | "3M" | "6M" | "1Y" | "All"): string | null {
+  if (range === "All") return null;
+  const now = new Date();
+  const offsets: Record<string, number> = {
+    "1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365,
+  };
+  now.setDate(now.getDate() - offsets[range]);
+  return now.toISOString().split("T")[0];
+}
+
 export function calculatePlates(totalWeight: number): PlateBreakdown {
-  let remaining = totalWeight - BAR_WEIGHT;
+  const remaining = totalWeight - BAR_WEIGHT;
   if (remaining < 0) {
     return { bar: BAR_WEIGHT, platesPerSide: [], remainder: totalWeight < BAR_WEIGHT ? totalWeight : 0 };
   }

@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Utensils, Weight, Dumbbell, LayoutDashboard } from "lucide-react";
+import { Utensils, Weight, Dumbbell, LayoutDashboard, Footprints } from "lucide-react";
 
 const links = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/food", label: "Food", icon: Utensils },
   { href: "/weight", label: "Weight", icon: Weight },
   { href: "/workouts", label: "Workouts", icon: Dumbbell },
+  { href: "/cardio", label: "Cardio", icon: Footprints },
 ];
 
 export default function Navigation() {
