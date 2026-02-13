@@ -14,7 +14,7 @@ src/
 │   ├── food/page.tsx         # Food log with DB search, gram/calorie scaling, Create Meal, inline editable macro goals
 │   ├── weight/page.tsx       # Weight tracker with time range filter, weekly averages bar chart, BMI card
 │   ├── workouts/page.tsx     # Workout planner with completion flow, congrats popup, progressive overload
-│   ├── cardio/page.tsx       # Running-focused cardio tracker (light run, heavy run, sprint, jog) with pace/distance charts
+│   ├── cardio/page.tsx       # Running analytics: GPX import, PR board, improvement banner, pace trendline, run calendar heatmap, weekly volume, streak
 │   └── globals.css           # Tailwind theme and custom CSS variables
 ├── components/
 │   ├── Navigation.tsx        # 5-link nav: Dashboard, Food, Weight, Workouts, Cardio. Bottom nav (mobile) / sidebar (desktop)
@@ -22,7 +22,7 @@ src/
 └── lib/
     ├── types.ts              # All TypeScript interfaces (FoodEntry, WeightEntry, Exercise, WorkoutDay, MacroGoals, CardioEntry, UserSettings, WorkoutLog, CompletedExercise, FoodDatabaseItem)
     ├── storage.ts            # localStorage CRUD (caltrack_food, caltrack_weight, caltrack_workouts, caltrack_goals, caltrack_cardio, caltrack_settings, caltrack_workout_logs, caltrack_custom_foods)
-    ├── utils.ts              # Helpers: generateId, todayString, formatDate, calculatePlates, calculatePace, calculateBMI, getBMICategory, getDateRangeStart
+    ├── utils.ts              # Helpers: generateId, todayString, formatDate, calculatePlates, calculatePace, calculateBMI, getBMICategory, getDateRangeStart, haversineDistance, linearRegression, parseGPX
     └── foodDatabase.ts       # Static array of ~140 common foods with macro data and servingGrams (FoodDatabaseItem[])
 e2e/
 ├── food.spec.ts              # Playwright E2E tests for food page (search, scaling, Create Meal)
@@ -81,7 +81,7 @@ All data lives in localStorage under these keys:
 - `caltrack_weight` — `WeightEntry[]` (id, weight, date)
 - `caltrack_workouts` — `WorkoutDay[]` (id, name, dayOfWeek[], exercises[])
 - `caltrack_goals` — `MacroGoals` (calories, protein, carbs, fat)
-- `caltrack_cardio` — `CardioEntry[]` (id, date, type, distance, duration, notes)
+- `caltrack_cardio` — `CardioEntry[]` (id, date, type, distance, duration, notes, source?, avgHeartRate?, elevationGain?)
 - `caltrack_settings` — `UserSettings` (heightFeet, heightInches)
 - `caltrack_workout_logs` — `WorkoutLog[]` (id, workoutDayId, workoutName, date, completed, exercises[])
 - `caltrack_custom_foods` — `FoodDatabaseItem[]` (user-saved custom foods for reuse in search)
@@ -146,6 +146,23 @@ The "Meal" button opens a modal to combine multiple database foods into a single
 3. Adjust each food's amount using serving/grams/calories toggle
 4. Running totals update live
 5. Optionally save to "My Foods" for reuse
+
+### Apple Watch sync / GPX import
+Direct Apple Watch auto-sync is not possible from a web app (requires native iOS HealthKit). Instead:
+1. **GPX file import** — click "Import" on the cardio page, upload a `.gpx` file from an Apple Watch workout
+2. The GPX parser uses haversine distance between trackpoints to compute total distance, duration, elevation gain, and date
+3. Imported runs get `source: "gpx_import"` and display a "GPX" badge in the history list
+4. **Recommended workflow**: Use HealthFit or RunGap on iPhone to auto-export each Apple Watch workout as a GPX file, then import those files
+
+### Running analytics & improvement tracking
+The cardio page provides these at-a-glance analytics:
+- **Improvement Banner** — compares average pace of your recent runs vs older runs, shows percentage change. Green = "Getting Faster", yellow = "Holding Steady", red = "Slowing Down"
+- **PR Board** — personal records: fastest overall pace, longest run, best pace per run type (jog/light/heavy/sprint), best times for standard distances (1mi, 5K, 10K, half, marathon)
+- **Pace Trend with Trendline** — line chart of each run's pace with a dashed linear regression line, colored green (improving) or red (declining)
+- **Run Calendar Heatmap** — GitHub-style grid of last 13 weeks, colored by distance per day (darker green = more miles)
+- **Streak Counter** — consecutive days with a logged run
+- **Weekly Mileage Chart** — bar chart of total distance per week over last 12 weeks
+- Distance categories for PRs are defined in `DISTANCE_CATEGORIES` in `types.ts`
 
 ### Workout completion flow
 1. User clicks "Complete Workout" on today's workout card

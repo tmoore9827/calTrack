@@ -73,7 +73,19 @@ export interface CardioEntry {
   distance: number; // in miles
   duration: number; // in minutes
   notes: string;
+  source?: "manual" | "gpx_import"; // how the entry was added
+  avgHeartRate?: number; // from import
+  elevationGain?: number; // feet, from import
 }
+
+// Standard distance categories for PR tracking
+export const DISTANCE_CATEGORIES = [
+  { key: "1mi", label: "1 Mile", min: 0.9, max: 1.1 },
+  { key: "5k", label: "5K", min: 2.9, max: 3.3 },
+  { key: "10k", label: "10K", min: 5.9, max: 6.5 },
+  { key: "half", label: "Half Marathon", min: 12.8, max: 13.5 },
+  { key: "full", label: "Marathon", min: 25.8, max: 26.5 },
+] as const;
 
 export const CARDIO_TYPE_LABELS: Record<CardioEntry["type"], string> = {
   light_run: "Light Run",
