@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from "react";
 import { getCardioEntries, saveCardioEntries } from "@/lib/storage";
 import { CardioEntry, CARDIO_TYPE_LABELS, DISTANCE_CATEGORIES } from "@/lib/types";
 import { generateId, todayString, formatDate, calculatePace, linearRegression, parseGPX } from "@/lib/utils";
-import { Plus, Trash2, X, Timer, Upload, Trophy, TrendingUp, TrendingDown, Minus, Zap } from "lucide-react";
+import { Plus, Trash2, X, Timer, Upload, Trophy, TrendingUp, TrendingDown, Minus, Zap, Watch, RefreshCw } from "lucide-react";
+import { isHealthKitAvailable, requestHealthKitPermission, fetchRunningWorkouts, HealthKitWorkout } from "@/lib/healthkit";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -32,6 +33,9 @@ export default function CardioPage() {
   const [showImport, setShowImport] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
+  const [healthKitAvail, setHealthKitAvail] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Form state
@@ -45,6 +49,8 @@ export default function CardioPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe localStorage load
     setEntries(getCardioEntries());
     setMounted(true);
+    // Check if running in Capacitor with HealthKit
+    isHealthKitAvailable().then(setHealthKitAvail);
   }, []);
 
   const sorted = [...entries].sort((a, b) => a.date.localeCompare(b.date));
@@ -104,6 +110,46 @@ export default function CardioPage() {
       setImportStatus(`Imported: ${parsed.distance} mi, ${parsed.duration.toFixed(1)} min on ${formatDate(parsed.date)}`);
     };
     reader.readAsText(file);
+  }
+
+  async function syncHealthKit() {
+    setSyncing(true);
+    setSyncStatus(null);
+    try {
+      const granted = await requestHealthKitPermission();
+      if (!granted) {
+        setSyncStatus("HealthKit permission denied. Enable it in Settings → Privacy → Health.");
+        setSyncing(false);
+        return;
+      }
+      const workouts = await fetchRunningWorkouts(90);
+      // De-duplicate by checking if UUID already imported
+      const existingIds = new Set(entries.map((e) => e.notes).filter(Boolean));
+      const newWorkouts = workouts.filter((w: HealthKitWorkout) => !existingIds.has(`hk:${w.uuid}`));
+      if (newWorkouts.length === 0) {
+        setSyncStatus("Already up to date — no new workouts found.");
+        setSyncing(false);
+        return;
+      }
+      const newEntries: CardioEntry[] = newWorkouts.map((w: HealthKitWorkout) => ({
+        id: generateId(),
+        date: w.startDate.split("T")[0],
+        type: "jog" as const,
+        distance: w.distanceMiles,
+        duration: w.durationMinutes,
+        notes: `hk:${w.uuid}`,
+        source: "gpx_import" as const, // reuse existing source tag
+        avgHeartRate: w.avgHeartRate ?? undefined,
+        elevationGain: w.elevationGain ?? undefined,
+      }));
+      const updated = [...entries, ...newEntries];
+      setEntries(updated);
+      saveCardioEntries(updated);
+      setSyncStatus(`Synced ${newEntries.length} new workout${newEntries.length > 1 ? "s" : ""} from Apple Watch`);
+    } catch {
+      setSyncStatus("Sync failed. Please try again.");
+    }
+    setSyncing(false);
   }
 
   // ─── Stats ───
@@ -272,12 +318,23 @@ export default function CardioPage() {
           <p className="text-foreground/40 text-sm mt-1">Track your runs &amp; improvement</p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowImport(true)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card border border-border text-foreground/60 text-sm hover:text-foreground transition-colors"
-          >
-            <Upload size={14} /> Import
-          </button>
+          {healthKitAvail ? (
+            <button
+              onClick={syncHealthKit}
+              disabled={syncing}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card border border-border text-foreground/60 text-sm hover:text-foreground transition-colors disabled:opacity-50"
+            >
+              {syncing ? <RefreshCw size={14} className="animate-spin" /> : <Watch size={14} />}
+              {syncing ? "Syncing..." : "Sync"}
+            </button>
+          ) : (
+            <button
+              onClick={() => setShowImport(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card border border-border text-foreground/60 text-sm hover:text-foreground transition-colors"
+            >
+              <Upload size={14} /> Import
+            </button>
+          )}
           <button
             onClick={() => setShowAdd(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
@@ -321,6 +378,24 @@ export default function CardioPage() {
           </div>
         </div>
       </div>
+
+      {/* Sync status */}
+      {syncStatus && (
+        <div
+          className={`rounded-xl p-3 text-sm flex items-center justify-between ${
+            syncStatus.startsWith("Synced")
+              ? "bg-success/10 text-success"
+              : syncStatus.includes("denied") || syncStatus.includes("failed")
+                ? "bg-danger/10 text-danger"
+                : "bg-info/10 text-info"
+          }`}
+        >
+          <span>{syncStatus}</span>
+          <button onClick={() => setSyncStatus(null)} className="ml-2 opacity-60 hover:opacity-100">
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* ─── Improvement Banner ─── */}
       {improvementData && (

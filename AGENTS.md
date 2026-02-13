@@ -2,7 +2,7 @@
 
 ## Overview
 
-calTrack is a client-side health and fitness tracking app built with Next.js 16, React 19, TypeScript, and Tailwind CSS 4. All data is stored in the browser via localStorage — there is no backend, database, or authentication.
+calTrack is a health and fitness tracking app built with Next.js 16, React 19, TypeScript, and Tailwind CSS 4. Packaged as an iOS app via Capacitor with Apple Watch / HealthKit integration. All data is stored locally via localStorage — there is no backend, database, or authentication.
 
 ## Project structure
 
@@ -23,10 +23,15 @@ src/
     ├── types.ts              # All TypeScript interfaces (FoodEntry, WeightEntry, Exercise, WorkoutDay, MacroGoals, CardioEntry, UserSettings, WorkoutLog, CompletedExercise, FoodDatabaseItem)
     ├── storage.ts            # localStorage CRUD (caltrack_food, caltrack_weight, caltrack_workouts, caltrack_goals, caltrack_cardio, caltrack_settings, caltrack_workout_logs, caltrack_custom_foods)
     ├── utils.ts              # Helpers: generateId, todayString, formatDate, calculatePlates, calculatePace, calculateBMI, getBMICategory, getDateRangeStart, haversineDistance, linearRegression, parseGPX
+    ├── healthkit.ts          # HealthKit Capacitor plugin service (Apple Watch auto-sync)
     └── foodDatabase.ts       # Static array of ~140 common foods with macro data and servingGrams (FoodDatabaseItem[])
+native/ios/
+├── HealthKitPlugin.swift     # Custom Capacitor plugin: reads running workouts from Apple Health
+└── HealthKitPlugin.m         # ObjC bridge for Capacitor plugin registration
 e2e/
 ├── food.spec.ts              # Playwright E2E tests for food page (search, scaling, Create Meal)
 └── navigation.spec.ts        # Playwright E2E tests for page navigation
+capacitor.config.ts           # Capacitor iOS config (appId, webDir, HealthKit plugin settings)
 playwright.config.ts          # Playwright config (chromium + mobile, dev server auto-start)
 ```
 
@@ -40,6 +45,9 @@ playwright.config.ts          # Playwright config (chromium + mobile, dev server
 | `npm run lint`       | Run ESLint                       | Run before committing                      |
 | `npm run test:e2e`   | Run Playwright E2E tests         | Requires `npx playwright install` first    |
 | `npm run test:e2e:ui`| Run Playwright in interactive UI | Opens visual test runner                   |
+| `npm run ios:build`  | Build static + sync to iOS       | Runs `next build` then `cap sync ios`      |
+| `npm run ios:open`   | Open Xcode project               | Requires macOS + Xcode installed           |
+| `npm run ios:run`    | Build & run on iOS device/sim    | Requires macOS + Xcode installed           |
 
 Always use `npm run dev` while iterating. Do not run production builds during agent sessions — it disables hot reload.
 
@@ -103,6 +111,7 @@ Dark theme with green accent. Key color variables:
 
 - **Recharts** — used for weight progress chart, weekly averages bar chart, weekly calorie bar chart, macro donut pie chart, cardio distance/pace charts
 - **Lucide React** — icon library used across all pages
+- **@capacitor/core + @capacitor/cli + @capacitor/ios** — Native iOS shell for App Store distribution
 - **Playwright** (devDependency) — E2E testing framework
 - No other runtime dependencies beyond Next.js and React
 
@@ -147,12 +156,21 @@ The "Meal" button opens a modal to combine multiple database foods into a single
 4. Running totals update live
 5. Optionally save to "My Foods" for reuse
 
-### Apple Watch sync / GPX import
-Direct Apple Watch auto-sync is not possible from a web app (requires native iOS HealthKit). Instead:
-1. **GPX file import** — click "Import" on the cardio page, upload a `.gpx` file from an Apple Watch workout
+### Apple Watch sync / HealthKit
+The app supports two sync methods depending on the platform:
+
+**Native iOS (Capacitor)** — automatic HealthKit integration:
+1. On first launch, the app requests HealthKit read permissions for running workouts
+2. Tap "Sync" button on the cardio page to pull all Apple Watch running workouts
+3. Uses `HKWorkoutActivityType.running` queries with date range filtering
+4. De-duplicates by storing HealthKit UUID in the notes field (`hk:<uuid>`)
+5. The custom Capacitor plugin is in `native/ios/` (Swift + ObjC bridge)
+
+**Web fallback** — GPX file import:
+1. Click "Import" on the cardio page, upload a `.gpx` file from an Apple Watch workout
 2. The GPX parser uses haversine distance between trackpoints to compute total distance, duration, elevation gain, and date
 3. Imported runs get `source: "gpx_import"` and display a "GPX" badge in the history list
-4. **Recommended workflow**: Use HealthFit or RunGap on iPhone to auto-export each Apple Watch workout as a GPX file, then import those files
+4. Recommended: use HealthFit or RunGap on iPhone to auto-export each Apple Watch workout as GPX files
 
 ### Running analytics & improvement tracking
 The cardio page provides these at-a-glance analytics:
@@ -182,3 +200,57 @@ The cardio page provides these at-a-glance analytics:
 2. Import `{ test, expect } from "@playwright/test"`
 3. Use `page.goto("/route")` to navigate (baseURL is localhost:3000)
 4. Run with `npm run test:e2e`
+
+## iOS App (Capacitor)
+
+### Architecture
+The app uses **Capacitor** to wrap the Next.js static export in a native iOS WKWebView. `next.config.ts` has `output: "export"` which generates static HTML/CSS/JS into `out/`. Capacitor copies `out/` into the iOS project and serves it natively.
+
+### Prerequisites (on macOS)
+- Xcode 16+ with iOS 17+ SDK
+- Apple Developer account (for App Store distribution)
+- CocoaPods (`sudo gem install cocoapods`)
+
+### Initial iOS setup (one-time)
+```bash
+npm run ios:build          # Build static export + create iOS project
+npx cap add ios            # Initialize iOS project (creates ios/ directory)
+
+# Copy HealthKit plugin into Xcode project:
+cp native/ios/HealthKitPlugin.swift ios/App/App/
+cp native/ios/HealthKitPlugin.m ios/App/App/
+
+# Open Xcode:
+npm run ios:open
+```
+
+### Xcode configuration
+1. **Signing**: Select your team under Signing & Capabilities
+2. **HealthKit**: Signing & Capabilities → + Capability → HealthKit
+3. **Info.plist**: Add `NSHealthShareUsageDescription` = "calTrack reads your workouts to track running progress"
+4. **Bundle ID**: Set to `com.caltrack.app` (or your preferred ID, must match `capacitor.config.ts`)
+
+### Build & deploy cycle
+```bash
+npm run ios:build          # Rebuild static site + sync to iOS
+npm run ios:open           # Open in Xcode for device testing
+# Or:
+npm run ios:run            # Build and deploy directly to connected device
+```
+
+### App Store submission
+1. In Xcode: Product → Archive
+2. Distribute App → App Store Connect
+3. Complete App Store Connect listing (screenshots, description, etc.)
+4. Submit for review
+
+### HealthKit plugin details
+The custom plugin (`native/ios/HealthKitPlugin.swift`) provides three methods:
+- `isAvailable()` — checks if HealthKit is available on device
+- `requestAuthorization()` — requests read permissions for workouts, distance, heart rate, calories
+- `getRunningWorkouts(startDate, endDate)` — fetches `HKWorkoutActivityType.running` workouts with distance, duration, calories
+
+The TypeScript service (`src/lib/healthkit.ts`) wraps these with a web fallback that returns empty results on non-iOS platforms.
+
+### Data persistence
+Even as an iOS app, data stays in localStorage (WebView localStorage persists across app launches). No migration needed — the same storage layer works on both web and iOS.
