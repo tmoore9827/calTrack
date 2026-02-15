@@ -201,10 +201,36 @@ The cardio page provides these at-a-glance analytics:
 3. Use `page.goto("/route")` to navigate (baseURL is localhost:3000)
 4. Run with `npm run test:e2e`
 
+## Deployment
+
+### Web (Vercel) — primary
+The app is deployed to **Vercel** at the project's GitHub repo (`tmoore9827/calTrack`). Vercel auto-deploys on every push.
+
+- `next.config.ts` has **no** `output: "export"` — Vercel uses its native Next.js support
+- No environment variables or server config needed
+- All data is stored client-side in localStorage — Vercel just serves the static pages
+- To update the live site: push code changes to the repo, Vercel auto-deploys within ~1 minute
+
+### Web vs Native comparison
+
+| Feature | Web (Vercel) | Native iOS (Capacitor) |
+|---|---|---|
+| Calorie / food / weight tracking | Yes | Yes |
+| Workout logging | Yes | Yes |
+| Charts & dashboard | Yes | Yes |
+| HealthKit (Apple Watch auto-sync) | **No** | Yes |
+| Install method | Add to Home Screen from Safari | Xcode (requires USB once) or TestFlight ($99/yr) |
+| Updates | Automatic via Vercel | Rebuild + redeploy via Xcode |
+
+### iOS native deployment options (for HealthKit)
+- **Xcode + USB (free)**: Plug in iPhone once, install app, enable wireless debugging for future deploys over Wi-Fi
+- **TestFlight ($99/yr)**: Upload to TestFlight from Xcode, install over the air — no cable needed on the phone side
+- For web-only usage, runs can be logged manually or imported via GPX files
+
 ## iOS App (Capacitor)
 
 ### Architecture
-The app uses **Capacitor** to wrap the Next.js static export in a native iOS WKWebView. `next.config.ts` has `output: "export"` which generates static HTML/CSS/JS into `out/`. Capacitor copies `out/` into the iOS project and serves it natively.
+The app uses **Capacitor** to wrap the Next.js static export in a native iOS WKWebView. To build for iOS, temporarily add `output: "export"` to `next.config.ts` which generates static HTML/CSS/JS into `out/`. Capacitor copies `out/` into the iOS project and serves it natively. **Remove `output: "export"` after building for iOS if deploying to Vercel.**
 
 ### Prerequisites (on macOS)
 - Xcode 16+ with iOS 17+ SDK
