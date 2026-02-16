@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { getFoodEntries, saveFoodEntries, getGoals, saveGoals, getCustomFoods, saveCustomFoods } from "@/lib/storage";
 import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
 import { generateId, todayString } from "@/lib/utils";
 import { FOOD_DATABASE } from "@/lib/foodDatabase";
-import { Plus, Trash2, Pencil, Check, X, Star, Layers } from "lucide-react";
+import { searchUsdaLocal, getUsdaMeta, UsdaStoredFood } from "@/lib/usdaDb";
+import { Plus, Trash2, Pencil, Check, X, Star, Layers, Loader2 } from "lucide-react";
 
 type InputMode = "serving" | "grams" | "calories";
 
@@ -58,8 +59,14 @@ export default function FoodPage() {
   // Food search & DB selection
   const [customFoods, setCustomFoods] = useState<FoodDatabaseItem[]>([]);
   const [searchResults, setSearchResults] = useState<(FoodDatabaseItem & { isCustom?: boolean })[]>([]);
+  const [usdaResults, setUsdaResults] = useState<UsdaStoredFood[]>([]);
+  const [usdaSearching, setUsdaSearching] = useState(false);
+  const usdaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [saveToDb, setSaveToDb] = useState(false);
   const [servingLabel, setServingLabel] = useState("");
+
+  // USDA database state
+  const [usdaSynced, setUsdaSynced] = useState(false);
 
   // Gram/calorie scaling
   const [selectedFood, setSelectedFood] = useState<FoodDatabaseItem | null>(null);
@@ -82,6 +89,13 @@ export default function FoodPage() {
     setEntries(getFoodEntries());
     setGoals(getGoals());
     setCustomFoods(getCustomFoods());
+    // Check USDA sync status (auto-sync handled by UsdaAutoSync in layout)
+    getUsdaMeta().then((meta) => setUsdaSynced(meta.synced));
+    // Re-check periodically in case background sync finishes while on this page
+    const interval = setInterval(() => {
+      getUsdaMeta().then((meta) => setUsdaSynced(meta.synced));
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   if (!goals) return null;
@@ -161,6 +175,9 @@ export default function FoodPage() {
     setInputMode("serving");
     setAmount("1");
     setSearchResults([]);
+    setUsdaResults([]);
+    setUsdaSearching(false);
+    if (usdaTimerRef.current) clearTimeout(usdaTimerRef.current);
   }
 
   function deleteEntry(id: string) {
@@ -169,11 +186,34 @@ export default function FoodPage() {
     saveFoodEntries(updated);
   }
 
+  const debouncedUsdaLocalSearch = useCallback((query: string) => {
+    if (usdaTimerRef.current) clearTimeout(usdaTimerRef.current);
+
+    if (query.trim().length < 2 || !usdaSynced) {
+      setUsdaResults([]);
+      setUsdaSearching(false);
+      return;
+    }
+
+    setUsdaSearching(true);
+    usdaTimerRef.current = setTimeout(async () => {
+      try {
+        const results = await searchUsdaLocal(query, 10);
+        setUsdaResults(results);
+      } catch {
+        setUsdaResults([]);
+      }
+      setUsdaSearching(false);
+    }, 150);
+  }, [usdaSynced]);
+
   function handleFoodSearch(query: string) {
     setName(query);
     setSelectedFood(null);
     if (query.trim().length < 2) {
       setSearchResults([]);
+      setUsdaResults([]);
+      setUsdaSearching(false);
       return;
     }
     const q = query.toLowerCase();
@@ -184,6 +224,9 @@ export default function FoodPage() {
       .filter((item) => item.name.toLowerCase().includes(q))
       .map((item) => ({ ...item, isCustom: false as const }));
     setSearchResults([...customResults, ...builtinResults].slice(0, 8));
+
+    // Search local USDA IndexedDB
+    debouncedUsdaLocalSearch(query);
   }
 
   function selectFood(item: FoodDatabaseItem) {
@@ -196,6 +239,8 @@ export default function FoodPage() {
     setCarbs(String(item.carbs));
     setFat(String(item.fat));
     setSearchResults([]);
+    setUsdaResults([]);
+    setUsdaSearching(false);
     setSaveToDb(false);
   }
 
@@ -225,10 +270,14 @@ export default function FoodPage() {
   }
 
   // Create Meal functions
+  const [mealUsdaResults, setMealUsdaResults] = useState<UsdaStoredFood[]>([]);
+  const mealUsdaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function handleMealSearch(query: string) {
     setMealSearch(query);
     if (query.trim().length < 2) {
       setMealSearchResults([]);
+      setMealUsdaResults([]);
       return;
     }
     const q = query.toLowerCase();
@@ -236,6 +285,19 @@ export default function FoodPage() {
       .filter((item) => item.name.toLowerCase().includes(q))
       .slice(0, 6);
     setMealSearchResults(results);
+
+    // Local USDA search for meals
+    if (mealUsdaTimerRef.current) clearTimeout(mealUsdaTimerRef.current);
+    if (usdaSynced) {
+      mealUsdaTimerRef.current = setTimeout(async () => {
+        try {
+          const uResults = await searchUsdaLocal(query, 6);
+          setMealUsdaResults(uResults);
+        } catch {
+          setMealUsdaResults([]);
+        }
+      }, 150);
+    }
   }
 
   function addToMeal(food: FoodDatabaseItem) {
@@ -498,11 +560,11 @@ export default function FoodPage() {
                 className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
                 autoFocus
               />
-              {searchResults.length > 0 && (
-                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-48 overflow-y-auto z-10">
+              {(searchResults.length > 0 || usdaResults.length > 0 || usdaSearching) && (
+                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-64 overflow-y-auto z-10">
                   {searchResults.map((item, idx) => (
                     <button
-                      key={idx}
+                      key={`local-${idx}`}
                       type="button"
                       onClick={() => selectFood(item)}
                       className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
@@ -517,6 +579,29 @@ export default function FoodPage() {
                       <span className="text-foreground/40 text-xs">{item.calories} cal</span>
                     </button>
                   ))}
+                  {(usdaResults.length > 0 || usdaSearching) && (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-foreground/30 uppercase tracking-wider bg-card border-b border-border flex items-center gap-1.5">
+                        USDA FoodData Central
+                        {usdaSearching && <Loader2 size={10} className="animate-spin" />}
+                      </div>
+                      {usdaResults.map((item) => (
+                        <button
+                          key={`usda-${item.fdcId}`}
+                          type="button"
+                          onClick={() => selectFood(item)}
+                          className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium">{item.name}</span>
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">USDA</span>
+                            <span className="text-foreground/30 text-xs">{item.serving}</span>
+                          </div>
+                          <span className="text-foreground/40 text-xs">{item.calories} cal</span>
+                        </button>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -695,8 +780,8 @@ export default function FoodPage() {
                 placeholder="Search food to add..."
                 className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
               />
-              {mealSearchResults.length > 0 && (
-                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-40 overflow-y-auto z-10">
+              {(mealSearchResults.length > 0 || mealUsdaResults.length > 0) && (
+                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-48 overflow-y-auto z-10">
                   {mealSearchResults.map((item, idx) => (
                     <button
                       key={idx}
@@ -708,6 +793,27 @@ export default function FoodPage() {
                       <span className="text-foreground/40 text-xs">{item.calories} cal / {item.serving}</span>
                     </button>
                   ))}
+                  {mealUsdaResults.length > 0 && (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-foreground/30 uppercase tracking-wider bg-card border-b border-border">
+                        USDA FoodData Central
+                      </div>
+                      {mealUsdaResults.map((item) => (
+                        <button
+                          key={`usda-${item.fdcId}`}
+                          type="button"
+                          onClick={() => addToMeal(item)}
+                          className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium">{item.name}</span>
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">USDA</span>
+                          </div>
+                          <span className="text-foreground/40 text-xs">{item.calories} cal / {item.serving}</span>
+                        </button>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
             </div>

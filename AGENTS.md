@@ -24,7 +24,9 @@ src/
     ├── storage.ts            # localStorage CRUD (caltrack_food, caltrack_weight, caltrack_workouts, caltrack_goals, caltrack_cardio, caltrack_settings, caltrack_workout_logs, caltrack_custom_foods)
     ├── utils.ts              # Helpers: generateId, todayString, formatDate, calculatePlates, calculatePace, calculateBMI, getBMICategory, getDateRangeStart, haversineDistance, linearRegression, parseGPX
     ├── healthkit.ts          # HealthKit Capacitor plugin service (Apple Watch auto-sync)
-    └── foodDatabase.ts       # Static array of ~140 common foods with macro data and servingGrams (FoodDatabaseItem[])
+    ├── foodDatabase.ts       # Static array of ~140 common foods with macro data and servingGrams (FoodDatabaseItem[])
+    ├── usdaApi.ts            # USDA FoodData Central API client — paginated bulk download of SR Legacy + Foundation + Branded foods
+    └── usdaDb.ts             # IndexedDB storage and local search for USDA foods (caltrack_usda database)
 native/ios/
 ├── HealthKitPlugin.swift     # Custom Capacitor plugin: reads running workouts from Apple Health
 └── HealthKitPlugin.m         # ObjC bridge for Capacitor plugin registration
@@ -83,7 +85,13 @@ This lets Claude directly control a browser to test the app via natural language
 
 ## Data model
 
-All data lives in localStorage under these keys:
+User data lives in localStorage, USDA food data lives in IndexedDB:
+
+**IndexedDB** (`caltrack_usda` database):
+- `foods` store — `UsdaStoredFood` objects keyed by `fdcId` (name, calories, protein, carbs, fat, serving, servingGrams, category, nameLower)
+- `meta` store — sync status: `{ key: "syncInfo", count, lastSync }`
+
+**localStorage** — these keys:
 
 - `caltrack_food` — `FoodEntry[]` (id, name, calories, protein, carbs, fat, date, meal)
 - `caltrack_weight` — `WeightEntry[]` (id, weight, date)
@@ -117,7 +125,7 @@ Dark theme with green accent. Key color variables:
 
 ## Environment variables
 
-None required. This app has zero external service dependencies.
+None required. The USDA FDC API uses a free `DEMO_KEY` (hardcoded in `usdaApi.ts`). Users can optionally replace it with their own key from https://fdc.nal.usda.gov/api-guide for higher rate limits.
 
 ## Common tasks
 
@@ -134,11 +142,38 @@ None required. This app has zero external service dependencies.
 Edit CSS variables in `src/app/globals.css` under the `@theme` block.
 
 ### Using the food database
-The food database is a static array in `src/lib/foodDatabase.ts`. Each entry has: name, calories, protein, carbs, fat, serving, servingGrams, and category. The `servingGrams` field enables gram-based scaling in the UI.
+The food database has three tiers:
 
-Categories: protein, legume, dairy, grain, fruit, vegetable, snack, beverage, meal, custom.
+1. **USDA FoodData Central (auto-synced)** — ~400K+ foods including restaurant chains (McDonald's, Chick-fil-A, Chipotle, etc.), branded/packaged foods, and generic ingredients. Downloaded automatically into IndexedDB on first app load. Includes SR Legacy (~7K generic foods), Foundation (~400 staple foods), and Branded (~400K+ packaged/restaurant foods). Results appear with a green "USDA" badge.
 
-To add foods, add entries to the `FOOD_DATABASE` array. Users can also save custom foods via the "Save to My Foods" button — these are stored in `caltrack_custom_foods` and appear first in search results with a "My Food" badge.
+2. **Built-in database** — Static array of ~140 common foods in `src/lib/foodDatabase.ts`. Each entry has: name, calories, protein, carbs, fat, serving, servingGrams, and category. The `servingGrams` field enables gram-based scaling.
+
+3. **Custom foods** — User-saved foods stored in `caltrack_custom_foods`. Appear first in search with a "My Food" badge.
+
+Categories: protein, legume, dairy, grain, fruit, vegetable, snack, beverage, meal, custom, restaurant, usda.
+
+To add built-in foods, add entries to the `FOOD_DATABASE` array. Users can also save custom foods via the "Save to My Foods" button.
+
+### USDA FoodData Central integration
+The app automatically downloads the full USDA food database on first load. No user action required.
+
+**How it works:**
+- On first visit to the Food Log page, the app checks IndexedDB for existing USDA data
+- If not synced, it automatically begins downloading all foods from the USDA FDC API in the background
+- A progress banner shows download status (non-blocking — users can still use the app)
+- Data is stored in IndexedDB (`caltrack_usda` database) — persists across sessions
+- After sync, all food searches include USDA results instantly with no API calls
+
+**Architecture:**
+- `src/lib/usdaApi.ts` — API client that paginates through all USDA foods (SR Legacy + Foundation + Branded) at 200 items/page and stores them via `usdaDb.ts`
+- `src/lib/usdaDb.ts` — IndexedDB wrapper with `openDb()`, `storeUsdaFoods()`, `searchUsdaLocal()`, `getUsdaMeta()`, `clearUsdaDb()`
+- Uses the free `DEMO_KEY` API key (30 req/hr limit). Full sync requires ~2000+ API calls so it takes time on first load
+- The sync modal (accessible by tapping the synced food count subtitle) allows re-syncing or clearing the database
+
+**Data flow:**
+1. USDA API → `mapUsdaFood()` extracts calories/protein/carbs/fat (nutrient IDs 1008/1003/1004/1005) and scales from per-100g to serving size
+2. Mapped foods stored in IndexedDB with `nameLower` field for search indexing
+3. `searchUsdaLocal()` does a full cursor scan with substring matching (fast enough for ~400K items)
 
 ### Food entry scaling (gram/calorie cycling)
 When a food is selected from the database, the user can toggle between three input modes:
