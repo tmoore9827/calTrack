@@ -815,7 +815,7 @@ export default function FoodPage() {
             </div>
 
             <p className="text-sm text-foreground/50">
-              Download the USDA FoodData Central database (Foundation + SR Legacy) to search ~8,000 foods offline. Data is stored locally in your browser.
+              Download the full USDA FoodData Central database including restaurants, branded foods, and generic ingredients. Data is stored locally in your browser for instant offline search.
             </p>
 
             {usdaSynced && (
@@ -823,7 +823,7 @@ export default function FoodPage() {
                 <div className="flex items-center gap-2 text-green-400 font-medium">
                   <Check size={14} /> Database synced
                 </div>
-                <p className="text-foreground/40 mt-1">{usdaFoodCount.toLocaleString()} foods available for offline search</p>
+                <p className="text-foreground/40 mt-1">{usdaFoodCount.toLocaleString()} foods (incl. restaurants) available offline</p>
               </div>
             )}
 

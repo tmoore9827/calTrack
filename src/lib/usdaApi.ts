@@ -49,6 +49,7 @@ function mapCategory(usdaCategory?: string): string {
   if (cat.includes("nut") || cat.includes("seed")) return "snack";
   if (cat.includes("beverage")) return "beverage";
   if (cat.includes("bean") || cat.includes("pea") || cat.includes("lentil")) return "legume";
+  if (cat.includes("restaurant") || cat.includes("fast food")) return "restaurant";
   return "usda";
 }
 
@@ -91,8 +92,9 @@ export interface SyncProgress {
 }
 
 /**
- * Download the entire USDA Foundation + SR Legacy databases page by page
- * and store them in IndexedDB. Calls onProgress to report status.
+ * Download the full USDA database (Foundation + SR Legacy + Branded)
+ * page by page and store in IndexedDB. Calls onProgress to report status.
+ * Branded includes restaurant chains and packaged foods (~400K+ items).
  */
 export async function syncUsdaDatabase(
   onProgress: (progress: SyncProgress) => void,
@@ -100,20 +102,32 @@ export async function syncUsdaDatabase(
 ): Promise<void> {
   const PAGE_SIZE = 200; // Max allowed by USDA API
   let totalStored = 0;
+  let grandTotal = 0;
 
-  for (const dataType of ["SR Legacy", "Foundation"]) {
-    // First request to get total count
+  const dataTypes = ["SR Legacy", "Foundation", "Branded"];
+
+  // First pass: get total counts for all data types
+  for (const dataType of dataTypes) {
     onProgress({ phase: "fetching", current: 0, total: 0, message: `Checking ${dataType} database size...` });
+    const countRes = await fetch(`${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "", dataType: [dataType], pageSize: 1, pageNumber: 1 }),
+      signal,
+    });
+    if (!countRes.ok) throw new Error(`USDA API error: ${countRes.status} ${countRes.statusText}`);
+    const countData: UsdaSearchResponse = await countRes.json();
+    grandTotal += countData.totalHits;
+  }
 
+  onProgress({ phase: "fetching", current: 0, total: grandTotal, message: `Downloading ${grandTotal.toLocaleString()} foods...` });
+
+  // Second pass: download all pages for each data type
+  for (const dataType of dataTypes) {
     const firstRes = await fetch(`${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: "",
-        dataType: [dataType],
-        pageSize: PAGE_SIZE,
-        pageNumber: 1,
-      }),
+      body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber: 1 }),
       signal,
     });
 
@@ -127,7 +141,7 @@ export async function syncUsdaDatabase(
     const firstBatch = firstData.foods.map(mapUsdaFood);
     await storeUsdaFoods(firstBatch);
     totalStored += firstBatch.length;
-    onProgress({ phase: "storing", current: totalStored, total: totalHits, message: `Downloading ${dataType}... (${totalStored} foods)` });
+    onProgress({ phase: "storing", current: totalStored, total: grandTotal, message: `${dataType}... ${totalStored.toLocaleString()} / ${grandTotal.toLocaleString()} foods` });
 
     // Fetch remaining pages
     for (let page = 2; page <= totalPages; page++) {
@@ -136,12 +150,7 @@ export async function syncUsdaDatabase(
       const res = await fetch(`${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: "",
-          dataType: [dataType],
-          pageSize: PAGE_SIZE,
-          pageNumber: page,
-        }),
+        body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber: page }),
         signal,
       });
 
@@ -155,8 +164,8 @@ export async function syncUsdaDatabase(
       onProgress({
         phase: "storing",
         current: totalStored,
-        total: totalHits,
-        message: `Downloading ${dataType}... (${totalStored} foods)`,
+        total: grandTotal,
+        message: `${dataType}... ${totalStored.toLocaleString()} / ${grandTotal.toLocaleString()} foods`,
       });
     }
   }
