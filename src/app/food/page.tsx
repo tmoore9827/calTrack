@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { getFoodEntries, saveFoodEntries, getGoals, saveGoals, getCustomFoods, saveCustomFoods } from "@/lib/storage";
 import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
 import { generateId, todayString } from "@/lib/utils";
 import { FOOD_DATABASE } from "@/lib/foodDatabase";
-import { Plus, Trash2, Pencil, Check, X, Star, Layers } from "lucide-react";
+import { syncUsdaDatabase, SyncProgress } from "@/lib/usdaApi";
+import { searchUsdaLocal, getUsdaMeta, clearUsdaDb, UsdaStoredFood } from "@/lib/usdaDb";
+import { Plus, Trash2, Pencil, Check, X, Star, Layers, Loader2, Database, RefreshCw } from "lucide-react";
 
 type InputMode = "serving" | "grams" | "calories";
 
@@ -58,8 +60,19 @@ export default function FoodPage() {
   // Food search & DB selection
   const [customFoods, setCustomFoods] = useState<FoodDatabaseItem[]>([]);
   const [searchResults, setSearchResults] = useState<(FoodDatabaseItem & { isCustom?: boolean })[]>([]);
+  const [usdaResults, setUsdaResults] = useState<UsdaStoredFood[]>([]);
+  const [usdaSearching, setUsdaSearching] = useState(false);
+  const usdaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [saveToDb, setSaveToDb] = useState(false);
   const [servingLabel, setServingLabel] = useState("");
+
+  // USDA database sync state
+  const [usdaSynced, setUsdaSynced] = useState(false);
+  const [usdaFoodCount, setUsdaFoodCount] = useState(0);
+  const [showUsdaSync, setShowUsdaSync] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const syncAbortRef = useRef<AbortController | null>(null);
 
   // Gram/calorie scaling
   const [selectedFood, setSelectedFood] = useState<FoodDatabaseItem | null>(null);
@@ -82,6 +95,11 @@ export default function FoodPage() {
     setEntries(getFoodEntries());
     setGoals(getGoals());
     setCustomFoods(getCustomFoods());
+    // Check USDA sync status
+    getUsdaMeta().then((meta) => {
+      setUsdaSynced(meta.synced);
+      setUsdaFoodCount(meta.count);
+    });
   }, []);
 
   if (!goals) return null;
@@ -161,6 +179,9 @@ export default function FoodPage() {
     setInputMode("serving");
     setAmount("1");
     setSearchResults([]);
+    setUsdaResults([]);
+    setUsdaSearching(false);
+    if (usdaTimerRef.current) clearTimeout(usdaTimerRef.current);
   }
 
   function deleteEntry(id: string) {
@@ -169,11 +190,34 @@ export default function FoodPage() {
     saveFoodEntries(updated);
   }
 
+  const debouncedUsdaLocalSearch = useCallback((query: string) => {
+    if (usdaTimerRef.current) clearTimeout(usdaTimerRef.current);
+
+    if (query.trim().length < 2 || !usdaSynced) {
+      setUsdaResults([]);
+      setUsdaSearching(false);
+      return;
+    }
+
+    setUsdaSearching(true);
+    usdaTimerRef.current = setTimeout(async () => {
+      try {
+        const results = await searchUsdaLocal(query, 10);
+        setUsdaResults(results);
+      } catch {
+        setUsdaResults([]);
+      }
+      setUsdaSearching(false);
+    }, 150);
+  }, [usdaSynced]);
+
   function handleFoodSearch(query: string) {
     setName(query);
     setSelectedFood(null);
     if (query.trim().length < 2) {
       setSearchResults([]);
+      setUsdaResults([]);
+      setUsdaSearching(false);
       return;
     }
     const q = query.toLowerCase();
@@ -184,6 +228,9 @@ export default function FoodPage() {
       .filter((item) => item.name.toLowerCase().includes(q))
       .map((item) => ({ ...item, isCustom: false as const }));
     setSearchResults([...customResults, ...builtinResults].slice(0, 8));
+
+    // Search local USDA IndexedDB
+    debouncedUsdaLocalSearch(query);
   }
 
   function selectFood(item: FoodDatabaseItem) {
@@ -196,6 +243,8 @@ export default function FoodPage() {
     setCarbs(String(item.carbs));
     setFat(String(item.fat));
     setSearchResults([]);
+    setUsdaResults([]);
+    setUsdaSearching(false);
     setSaveToDb(false);
   }
 
@@ -225,10 +274,14 @@ export default function FoodPage() {
   }
 
   // Create Meal functions
+  const [mealUsdaResults, setMealUsdaResults] = useState<UsdaStoredFood[]>([]);
+  const mealUsdaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function handleMealSearch(query: string) {
     setMealSearch(query);
     if (query.trim().length < 2) {
       setMealSearchResults([]);
+      setMealUsdaResults([]);
       return;
     }
     const q = query.toLowerCase();
@@ -236,6 +289,19 @@ export default function FoodPage() {
       .filter((item) => item.name.toLowerCase().includes(q))
       .slice(0, 6);
     setMealSearchResults(results);
+
+    // Local USDA search for meals
+    if (mealUsdaTimerRef.current) clearTimeout(mealUsdaTimerRef.current);
+    if (usdaSynced) {
+      mealUsdaTimerRef.current = setTimeout(async () => {
+        try {
+          const uResults = await searchUsdaLocal(query, 6);
+          setMealUsdaResults(uResults);
+        } catch {
+          setMealUsdaResults([]);
+        }
+      }, 150);
+    }
   }
 
   function addToMeal(food: FoodDatabaseItem) {
@@ -327,6 +393,38 @@ export default function FoodPage() {
   const dates = [...new Set(entries.map((e) => e.date))].sort().reverse();
   if (!dates.includes(selectedDate)) dates.unshift(selectedDate);
 
+  async function startSync() {
+    setSyncing(true);
+    setSyncProgress({ phase: "fetching", current: 0, total: 0, message: "Starting sync..." });
+    const controller = new AbortController();
+    syncAbortRef.current = controller;
+    try {
+      await syncUsdaDatabase((p) => setSyncProgress(p), controller.signal);
+      const meta = await getUsdaMeta();
+      setUsdaSynced(true);
+      setUsdaFoodCount(meta.count);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setSyncProgress({ phase: "error", current: 0, total: 0, message: `Error: ${err instanceof Error ? err.message : "Unknown error"}` });
+      }
+    }
+    setSyncing(false);
+  }
+
+  function cancelSync() {
+    if (syncAbortRef.current) syncAbortRef.current.abort();
+    setSyncing(false);
+    setSyncProgress(null);
+  }
+
+  async function handleClearUsda() {
+    await clearUsdaDb();
+    setUsdaSynced(false);
+    setUsdaFoodCount(0);
+    setUsdaResults([]);
+    setSyncProgress(null);
+  }
+
   const mealTotals = showCreateMeal ? getMealTotals() : null;
 
   return (
@@ -337,6 +435,17 @@ export default function FoodPage() {
           <p className="text-foreground/40 text-sm mt-1">Track your daily nutrition</p>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => setShowUsdaSync(true)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border font-medium text-sm transition-colors ${
+              usdaSynced
+                ? "bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20"
+                : "bg-card border-border text-foreground/60 hover:text-foreground"
+            }`}
+          >
+            <Database size={14} />
+            {usdaSynced ? `USDA` : "USDA"}
+          </button>
           <button
             onClick={() => setShowCreateMeal(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card border border-border text-foreground/60 font-medium text-sm hover:text-foreground transition-colors"
@@ -498,11 +607,11 @@ export default function FoodPage() {
                 className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
                 autoFocus
               />
-              {searchResults.length > 0 && (
-                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-48 overflow-y-auto z-10">
+              {(searchResults.length > 0 || usdaResults.length > 0 || usdaSearching) && (
+                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-64 overflow-y-auto z-10">
                   {searchResults.map((item, idx) => (
                     <button
-                      key={idx}
+                      key={`local-${idx}`}
                       type="button"
                       onClick={() => selectFood(item)}
                       className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
@@ -517,6 +626,29 @@ export default function FoodPage() {
                       <span className="text-foreground/40 text-xs">{item.calories} cal</span>
                     </button>
                   ))}
+                  {(usdaResults.length > 0 || usdaSearching) && (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-foreground/30 uppercase tracking-wider bg-card border-b border-border flex items-center gap-1.5">
+                        USDA FoodData Central
+                        {usdaSearching && <Loader2 size={10} className="animate-spin" />}
+                      </div>
+                      {usdaResults.map((item) => (
+                        <button
+                          key={`usda-${item.fdcId}`}
+                          type="button"
+                          onClick={() => selectFood(item)}
+                          className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium">{item.name}</span>
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">USDA</span>
+                            <span className="text-foreground/30 text-xs">{item.serving}</span>
+                          </div>
+                          <span className="text-foreground/40 text-xs">{item.calories} cal</span>
+                        </button>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -668,6 +800,90 @@ export default function FoodPage() {
         </div>
       )}
 
+      {/* USDA Database Sync modal */}
+      {showUsdaSync && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-4">
+          <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4">
+            <div className="w-10 h-1 bg-foreground/20 rounded-full mx-auto mb-2 md:hidden" />
+            <div className="flex justify-between items-center">
+              <h2 className="text-lg font-bold flex items-center gap-2">
+                <Database size={18} /> USDA Food Database
+              </h2>
+              <button onClick={() => { setShowUsdaSync(false); setSyncProgress(null); }} className="text-foreground/40 hover:text-foreground">
+                <X size={20} />
+              </button>
+            </div>
+
+            <p className="text-sm text-foreground/50">
+              Download the USDA FoodData Central database (Foundation + SR Legacy) to search ~8,000 foods offline. Data is stored locally in your browser.
+            </p>
+
+            {usdaSynced && (
+              <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3 text-sm">
+                <div className="flex items-center gap-2 text-green-400 font-medium">
+                  <Check size={14} /> Database synced
+                </div>
+                <p className="text-foreground/40 mt-1">{usdaFoodCount.toLocaleString()} foods available for offline search</p>
+              </div>
+            )}
+
+            {syncProgress && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm">
+                  {syncProgress.phase === "error" ? (
+                    <span className="text-red-400">{syncProgress.message}</span>
+                  ) : syncProgress.phase === "done" ? (
+                    <span className="text-green-400">{syncProgress.message}</span>
+                  ) : (
+                    <>
+                      <Loader2 size={14} className="animate-spin text-accent" />
+                      <span className="text-foreground/60">{syncProgress.message}</span>
+                    </>
+                  )}
+                </div>
+                {syncProgress.total > 0 && syncProgress.phase !== "done" && (
+                  <div className="h-2 bg-border rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-accent rounded-full transition-all duration-300"
+                      style={{ width: `${Math.min((syncProgress.current / syncProgress.total) * 100, 100)}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              {!syncing ? (
+                <>
+                  <button
+                    onClick={startSync}
+                    className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-accent text-black font-medium text-sm hover:bg-accent-dim transition-colors"
+                  >
+                    <RefreshCw size={14} />
+                    {usdaSynced ? "Re-sync Database" : "Download Database"}
+                  </button>
+                  {usdaSynced && (
+                    <button
+                      onClick={handleClearUsda}
+                      className="px-4 py-2.5 rounded-lg bg-background border border-border text-foreground/50 font-medium text-sm hover:text-red-400 hover:border-red-400/30 transition-colors"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </>
+              ) : (
+                <button
+                  onClick={cancelSync}
+                  className="flex-1 py-2.5 rounded-lg bg-background border border-border text-foreground/50 font-medium text-sm hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Create Meal modal */}
       {showCreateMeal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-4">
@@ -695,8 +911,8 @@ export default function FoodPage() {
                 placeholder="Search food to add..."
                 className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm"
               />
-              {mealSearchResults.length > 0 && (
-                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-40 overflow-y-auto z-10">
+              {(mealSearchResults.length > 0 || mealUsdaResults.length > 0) && (
+                <div className="absolute left-0 right-0 mt-1 bg-background border border-border rounded-lg max-h-48 overflow-y-auto z-10">
                   {mealSearchResults.map((item, idx) => (
                     <button
                       key={idx}
@@ -708,6 +924,27 @@ export default function FoodPage() {
                       <span className="text-foreground/40 text-xs">{item.calories} cal / {item.serving}</span>
                     </button>
                   ))}
+                  {mealUsdaResults.length > 0 && (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-foreground/30 uppercase tracking-wider bg-card border-b border-border">
+                        USDA FoodData Central
+                      </div>
+                      {mealUsdaResults.map((item) => (
+                        <button
+                          key={`usda-${item.fdcId}`}
+                          type="button"
+                          onClick={() => addToMeal(item)}
+                          className="w-full text-left px-3 py-2.5 min-h-[44px] text-sm hover:bg-card-hover border-b border-border last:border-0 flex justify-between items-center"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium">{item.name}</span>
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">USDA</span>
+                          </div>
+                          <span className="text-foreground/40 text-xs">{item.calories} cal / {item.serving}</span>
+                        </button>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
             </div>
