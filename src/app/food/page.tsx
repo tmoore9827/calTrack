@@ -90,15 +90,39 @@ export default function FoodPage() {
   const [editingField, setEditingField] = useState<keyof MacroGoals | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  // Auto-sync USDA database on first load
+  const autoSyncStarted = useRef(false);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe localStorage load
     setEntries(getFoodEntries());
     setGoals(getGoals());
     setCustomFoods(getCustomFoods());
-    // Check USDA sync status
+    // Check USDA sync status and auto-sync if needed
     getUsdaMeta().then((meta) => {
       setUsdaSynced(meta.synced);
       setUsdaFoodCount(meta.count);
+      if (!meta.synced && !autoSyncStarted.current) {
+        autoSyncStarted.current = true;
+        // Auto-start USDA database download in the background
+        setSyncing(true);
+        setSyncProgress({ phase: "fetching", current: 0, total: 0, message: "Downloading food database..." });
+        const controller = new AbortController();
+        syncAbortRef.current = controller;
+        syncUsdaDatabase((p) => setSyncProgress(p), controller.signal)
+          .then(() => getUsdaMeta())
+          .then((updatedMeta) => {
+            setUsdaSynced(true);
+            setUsdaFoodCount(updatedMeta.count);
+            setSyncing(false);
+          })
+          .catch((err) => {
+            if (!controller.signal.aborted) {
+              setSyncProgress({ phase: "error", current: 0, total: 0, message: `Sync failed: ${err instanceof Error ? err.message : "Unknown error"}` });
+            }
+            setSyncing(false);
+          });
+      }
     });
   }, []);
 
@@ -432,20 +456,15 @@ export default function FoodPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Food Log</h1>
-          <p className="text-foreground/40 text-sm mt-1">Track your daily nutrition</p>
+          {usdaSynced ? (
+            <button onClick={() => setShowUsdaSync(true)} className="text-foreground/30 text-sm mt-1 hover:text-foreground/50 flex items-center gap-1">
+              <Database size={10} /> {usdaFoodCount.toLocaleString()} USDA foods synced
+            </button>
+          ) : (
+            <p className="text-foreground/40 text-sm mt-1">Track your daily nutrition</p>
+          )}
         </div>
         <div className="flex gap-2">
-          <button
-            onClick={() => setShowUsdaSync(true)}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border font-medium text-sm transition-colors ${
-              usdaSynced
-                ? "bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20"
-                : "bg-card border-border text-foreground/60 hover:text-foreground"
-            }`}
-          >
-            <Database size={14} />
-            {usdaSynced ? `USDA` : "USDA"}
-          </button>
           <button
             onClick={() => setShowCreateMeal(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card border border-border text-foreground/60 font-medium text-sm hover:text-foreground transition-colors"
@@ -460,6 +479,32 @@ export default function FoodPage() {
           </button>
         </div>
       </div>
+
+      {/* USDA sync progress banner */}
+      {syncing && syncProgress && syncProgress.phase !== "done" && (
+        <div className="bg-card border border-border rounded-xl p-3 space-y-2">
+          <div className="flex items-center gap-2 text-sm">
+            <Loader2 size={14} className="animate-spin text-accent" />
+            <span className="text-foreground/60">{syncProgress.message}</span>
+          </div>
+          {syncProgress.total > 0 && (
+            <div className="h-1.5 bg-border rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent rounded-full transition-all duration-300"
+                style={{ width: `${Math.min((syncProgress.current / syncProgress.total) * 100, 100)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {syncProgress?.phase === "error" && (
+        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 flex items-center justify-between">
+          <span className="text-sm text-red-400">{syncProgress.message}</span>
+          <button onClick={() => { setSyncProgress(null); autoSyncStarted.current = false; }} className="text-xs text-foreground/40 hover:text-foreground">
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Date picker */}
       <div className="flex gap-2 overflow-x-auto pb-1">
