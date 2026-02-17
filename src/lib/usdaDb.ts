@@ -10,8 +10,8 @@ const DB_VERSION = 1;
 const STORE_NAME = "foods";
 const META_STORE = "meta";
 
-// Bump this when the dataset changes (e.g., adding Branded foods)
-// so existing users automatically re-sync
+// Bump this when the static data file is regenerated
+// so existing users automatically re-sync from the new file
 export const SYNC_VERSION = 2;
 
 function openDb(): Promise<IDBDatabase> {
@@ -39,13 +39,6 @@ export interface SyncMeta {
   syncVersion: number;
 }
 
-export interface ResumeState {
-  dataTypeIndex: number;
-  pageNumber: number;
-  totalStored: number;
-  grandTotal: number;
-}
-
 /** Get metadata (sync status, count, version, etc.) */
 export async function getUsdaMeta(): Promise<SyncMeta> {
   const db = await openDb();
@@ -61,43 +54,6 @@ export async function getUsdaMeta(): Promise<SyncMeta> {
     };
     req.onerror = () => resolve({ synced: false, count: 0, lastSync: null, syncVersion: 0 });
     db.close();
-  });
-}
-
-/** Get partial sync resume state (null if no partial sync in progress) */
-export async function getResumeState(): Promise<ResumeState | null> {
-  const db = await openDb();
-  return new Promise((resolve) => {
-    const tx = db.transaction(META_STORE, "readonly");
-    const store = tx.objectStore(META_STORE);
-    const req = store.get("resumeState");
-    req.onsuccess = () => resolve(req.result ? req.result as ResumeState : null);
-    req.onerror = () => resolve(null);
-    db.close();
-  });
-}
-
-/** Save partial sync progress so we can resume after rate-limit or failure */
-export async function saveResumeState(state: ResumeState): Promise<void> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(META_STORE, "readwrite");
-    const store = tx.objectStore(META_STORE);
-    store.put({ key: "resumeState", ...state });
-    tx.oncomplete = () => { db.close(); resolve(); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
-  });
-}
-
-/** Clear resume state (called when sync completes successfully) */
-export async function clearResumeState(): Promise<void> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(META_STORE, "readwrite");
-    const store = tx.objectStore(META_STORE);
-    store.delete("resumeState");
-    tx.oncomplete = () => { db.close(); resolve(); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
   });
 }
 
