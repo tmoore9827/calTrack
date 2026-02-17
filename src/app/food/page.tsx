@@ -754,6 +754,17 @@ export default function FoodPage() {
       )}
 
       {/* Create Meal modal */}
+      {/* USDA attribution */}
+      {usdaSynced && (
+        <p className="text-[10px] text-foreground/20 text-center leading-relaxed">
+          Food data from{" "}
+          <a href="https://fdc.nal.usda.gov" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground/40">
+            USDA FoodData Central
+          </a>
+          , U.S. Department of Agriculture, Agricultural Research Service. Published under CC0 1.0.
+        </p>
+      )}
+
       {showCreateMeal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-4">
           <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto">
