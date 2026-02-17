@@ -272,6 +272,35 @@ The cardio page provides these at-a-glance analytics:
   - Verify all ~400K foods load in ~5-15 seconds
   - Search for "Chick-fil-A" to confirm restaurant data
 
+## TODO — Barcode scanner
+
+Add camera-based barcode scanning to the Food Log page so users can scan a product's UPC/EAN barcode and instantly look up its nutrition info.
+
+**Implementation plan:**
+
+1. **Install barcode library** — `html5-qrcode` or `quagga2` (~50KB). Works in mobile Safari & Chrome via `getUserMedia`, no native plugin needed.
+
+2. **Include UPC field in USDA data** (`scripts/download-usda.mjs`)
+   - USDA Branded foods have a `gtinUpc` field — add it to the compact format as a 10th element
+   - Regenerate `public/data/usda-foods.json` with UPC data included
+
+3. **Add UPC index to IndexedDB** (`src/lib/usdaDb.ts`)
+   - Bump `DB_VERSION` to 2, add a `upc` index on the foods store in `onupgradeneeded`
+   - Add `lookupByUpc(upc: string)` function for instant barcode → food lookup
+
+4. **Create BarcodeScanner component** (`src/components/BarcodeScanner.tsx`)
+   - Camera viewfinder modal with scan region overlay
+   - On successful scan → call `lookupByUpc()` → auto-fill the Add Food form
+   - Handle permissions (camera denied), no-match (barcode not found), and multiple matches
+   - Mobile-first: bottom-sheet modal like existing modals
+
+5. **Add scan button to Food page** (`src/app/food/page.tsx`)
+   - Add a scan icon button next to the existing Add/Meal buttons
+   - When tapped, opens BarcodeScanner modal
+   - On match, pre-fills the food exactly like selecting from search results
+
+**Files to change:** `scripts/download-usda.mjs`, `src/lib/usdaDb.ts`, `src/lib/usdaApi.ts`, `src/app/food/page.tsx`, + new `src/components/BarcodeScanner.tsx`
+
 ## Deployment
 
 ### Web (Vercel) — primary
