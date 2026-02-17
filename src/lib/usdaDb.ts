@@ -10,6 +10,10 @@ const DB_VERSION = 1;
 const STORE_NAME = "foods";
 const META_STORE = "meta";
 
+// Bump this when the dataset changes (e.g., adding Branded foods)
+// so existing users automatically re-sync
+export const SYNC_VERSION = 2;
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -28,8 +32,22 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-/** Get metadata (sync status, count, etc.) */
-export async function getUsdaMeta(): Promise<{ synced: boolean; count: number; lastSync: string | null }> {
+export interface SyncMeta {
+  synced: boolean;
+  count: number;
+  lastSync: string | null;
+  syncVersion: number;
+}
+
+export interface ResumeState {
+  dataTypeIndex: number;
+  pageNumber: number;
+  totalStored: number;
+  grandTotal: number;
+}
+
+/** Get metadata (sync status, count, version, etc.) */
+export async function getUsdaMeta(): Promise<SyncMeta> {
   const db = await openDb();
   return new Promise((resolve) => {
     const tx = db.transaction(META_STORE, "readonly");
@@ -37,10 +55,49 @@ export async function getUsdaMeta(): Promise<{ synced: boolean; count: number; l
     const req = store.get("syncInfo");
     req.onsuccess = () => {
       const result = req.result;
-      resolve(result ? { synced: true, count: result.count, lastSync: result.lastSync } : { synced: false, count: 0, lastSync: null });
+      resolve(result
+        ? { synced: true, count: result.count, lastSync: result.lastSync, syncVersion: result.syncVersion || 0 }
+        : { synced: false, count: 0, lastSync: null, syncVersion: 0 });
     };
-    req.onerror = () => resolve({ synced: false, count: 0, lastSync: null });
+    req.onerror = () => resolve({ synced: false, count: 0, lastSync: null, syncVersion: 0 });
     db.close();
+  });
+}
+
+/** Get partial sync resume state (null if no partial sync in progress) */
+export async function getResumeState(): Promise<ResumeState | null> {
+  const db = await openDb();
+  return new Promise((resolve) => {
+    const tx = db.transaction(META_STORE, "readonly");
+    const store = tx.objectStore(META_STORE);
+    const req = store.get("resumeState");
+    req.onsuccess = () => resolve(req.result ? req.result as ResumeState : null);
+    req.onerror = () => resolve(null);
+    db.close();
+  });
+}
+
+/** Save partial sync progress so we can resume after rate-limit or failure */
+export async function saveResumeState(state: ResumeState): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, "readwrite");
+    const store = tx.objectStore(META_STORE);
+    store.put({ key: "resumeState", ...state });
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+/** Clear resume state (called when sync completes successfully) */
+export async function clearResumeState(): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, "readwrite");
+    const store = tx.objectStore(META_STORE);
+    store.delete("resumeState");
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
   });
 }
 
@@ -58,13 +115,13 @@ export async function storeUsdaFoods(foods: UsdaStoredFood[]): Promise<void> {
   });
 }
 
-/** Update sync metadata */
+/** Update sync metadata (includes syncVersion so outdated caches auto-refresh) */
 export async function updateSyncMeta(count: number): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(META_STORE, "readwrite");
     const store = tx.objectStore(META_STORE);
-    store.put({ key: "syncInfo", count, lastSync: new Date().toISOString() });
+    store.put({ key: "syncInfo", count, lastSync: new Date().toISOString(), syncVersion: SYNC_VERSION });
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error); };
   });

@@ -1,7 +1,11 @@
-import { UsdaStoredFood, storeUsdaFoods, updateSyncMeta } from "./usdaDb";
+import { UsdaStoredFood, storeUsdaFoods, updateSyncMeta, saveResumeState, getResumeState, clearResumeState } from "./usdaDb";
 
 const USDA_API_BASE = "https://api.nal.usda.gov/fdc/v1";
 const USDA_API_KEY = "DEMO_KEY"; // Free tier — users can get their own key at https://fdc.nal.usda.gov/api-guide
+
+const MAX_RETRIES = 5;
+const INITIAL_BACKOFF_MS = 2000; // 2 seconds, doubles each retry
+const RATE_LIMIT_WAIT_MS = 61000; // 61 seconds — DEMO_KEY resets per minute
 
 // Nutrient IDs in the USDA FoodData Central database
 const NUTRIENT_ENERGY = 1008; // Energy (kcal)
@@ -91,70 +95,155 @@ export interface SyncProgress {
   message: string;
 }
 
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Sync cancelled")); return; }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Sync cancelled")); }, { once: true });
+  });
+}
+
+/**
+ * Fetch with automatic retry on rate-limit (429) and transient errors.
+ * Uses exponential backoff for general errors and a longer wait for 429s.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+  onWaiting?: (msg: string) => void,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new Error("Sync cancelled");
+
+    try {
+      const res = await fetch(url, { ...init, signal });
+
+      if (res.status === 429) {
+        // Rate limited — wait and retry
+        const waitMs = RATE_LIMIT_WAIT_MS;
+        console.warn(`[USDA Sync] Rate limited (429). Waiting ${Math.round(waitMs / 1000)}s before retry ${attempt + 1}/${MAX_RETRIES}...`);
+        onWaiting?.(`Rate limited — waiting ${Math.round(waitMs / 1000)}s...`);
+        await sleep(waitMs, signal);
+        continue;
+      }
+
+      if (res.ok) return res;
+
+      // Server error (5xx) — retry with backoff
+      if (res.status >= 500 && attempt < MAX_RETRIES) {
+        const waitMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+        console.warn(`[USDA Sync] Server error ${res.status}. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        await sleep(waitMs, signal);
+        continue;
+      }
+
+      throw new Error(`USDA API error: ${res.status} ${res.statusText}`);
+    } catch (err) {
+      if (err instanceof Error && err.message === "Sync cancelled") throw err;
+      // Network error — retry with backoff
+      if (attempt < MAX_RETRIES) {
+        const waitMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
+        console.warn(`[USDA Sync] Network error: ${err}. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        await sleep(waitMs, signal);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("USDA API: max retries exceeded");
+}
+
 /**
  * Download the full USDA database (Foundation + SR Legacy + Branded)
  * page by page and store in IndexedDB. Calls onProgress to report status.
  * Branded includes restaurant chains and packaged foods (~400K+ items).
+ *
+ * Supports resumable sync — if a previous sync was interrupted (rate-limit,
+ * network error, tab close), it picks up from where it left off.
  */
 export async function syncUsdaDatabase(
   onProgress: (progress: SyncProgress) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const PAGE_SIZE = 200; // Max allowed by USDA API
-  let totalStored = 0;
-  let grandTotal = 0;
-
   const dataTypes = ["SR Legacy", "Foundation", "Branded"];
 
-  // First pass: get total counts for all data types
-  for (const dataType of dataTypes) {
-    onProgress({ phase: "fetching", current: 0, total: 0, message: `Checking ${dataType} database size...` });
-    const countRes = await fetch(`${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: "", dataType: [dataType], pageSize: 1, pageNumber: 1 }),
-      signal,
-    });
-    if (!countRes.ok) throw new Error(`USDA API error: ${countRes.status} ${countRes.statusText}`);
-    const countData: UsdaSearchResponse = await countRes.json();
-    grandTotal += countData.totalHits;
+  // Check for a partial sync to resume
+  const resume = await getResumeState();
+  let startDataTypeIndex = resume?.dataTypeIndex ?? 0;
+  let startPage = resume?.pageNumber ?? 1;
+  let totalStored = resume?.totalStored ?? 0;
+  let grandTotal = resume?.grandTotal ?? 0;
+
+  if (resume) {
+    console.log(`[USDA Sync] Resuming from ${dataTypes[resume.dataTypeIndex]} page ${resume.pageNumber} (${resume.totalStored} foods already stored)`);
   }
 
-  onProgress({ phase: "fetching", current: 0, total: grandTotal, message: `Downloading ${grandTotal.toLocaleString()} foods...` });
+  // Get total counts (always, so we have an accurate grand total)
+  if (grandTotal === 0) {
+    for (const dataType of dataTypes) {
+      onProgress({ phase: "fetching", current: 0, total: 0, message: `Checking ${dataType} database size...` });
+      const countRes = await fetchWithRetry(
+        `${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: "", dataType: [dataType], pageSize: 1, pageNumber: 1 }),
+        },
+        signal,
+        (msg) => onProgress({ phase: "fetching", current: totalStored, total: grandTotal, message: msg }),
+      );
+      const countData: UsdaSearchResponse = await countRes.json();
+      grandTotal += countData.totalHits;
+    }
+  }
 
-  // Second pass: download all pages for each data type
-  for (const dataType of dataTypes) {
-    const firstRes = await fetch(`${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber: 1 }),
-      signal,
-    });
+  onProgress({ phase: "fetching", current: totalStored, total: grandTotal, message: `Downloading ${grandTotal.toLocaleString()} foods...` });
+  console.log(`[USDA Sync] Starting download of ${grandTotal.toLocaleString()} foods`);
 
-    if (!firstRes.ok) throw new Error(`USDA API error: ${firstRes.status} ${firstRes.statusText}`);
+  // Download all pages for each data type (resumable)
+  for (let dtIdx = startDataTypeIndex; dtIdx < dataTypes.length; dtIdx++) {
+    const dataType = dataTypes[dtIdx];
+    const firstPageNum = dtIdx === startDataTypeIndex ? startPage : 1;
 
-    const firstData: UsdaSearchResponse = await firstRes.json();
-    const totalHits = firstData.totalHits;
-    const totalPages = Math.ceil(totalHits / PAGE_SIZE);
-
-    // Store first page
-    const firstBatch = firstData.foods.map(mapUsdaFood);
-    await storeUsdaFoods(firstBatch);
-    totalStored += firstBatch.length;
-    onProgress({ phase: "storing", current: totalStored, total: grandTotal, message: `${dataType}... ${totalStored.toLocaleString()} / ${grandTotal.toLocaleString()} foods` });
-
-    // Fetch remaining pages
-    for (let page = 2; page <= totalPages; page++) {
-      if (signal?.aborted) throw new Error("Sync cancelled");
-
-      const res = await fetch(`${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`, {
+    // Get total pages for this data type
+    const probeRes = await fetchWithRetry(
+      `${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`,
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber: page }),
-        signal,
-      });
+        body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber: 1 }),
+      },
+      signal,
+      (msg) => onProgress({ phase: "fetching", current: totalStored, total: grandTotal, message: msg }),
+    );
+    const probeData: UsdaSearchResponse = await probeRes.json();
+    const totalPages = Math.ceil(probeData.totalHits / PAGE_SIZE);
 
-      if (!res.ok) throw new Error(`USDA API error on page ${page}: ${res.status}`);
+    // Store probe page if we're starting fresh for this data type
+    if (firstPageNum === 1) {
+      const batch = probeData.foods.map(mapUsdaFood);
+      await storeUsdaFoods(batch);
+      totalStored += batch.length;
+      onProgress({ phase: "storing", current: totalStored, total: grandTotal, message: `${dataType}... ${totalStored.toLocaleString()} / ${grandTotal.toLocaleString()} foods` });
+      await saveResumeState({ dataTypeIndex: dtIdx, pageNumber: 2, totalStored, grandTotal });
+    }
+
+    // Fetch remaining pages
+    for (let page = Math.max(firstPageNum, 2); page <= totalPages; page++) {
+      if (signal?.aborted) throw new Error("Sync cancelled");
+
+      const res = await fetchWithRetry(
+        `${USDA_API_BASE}/foods/search?api_key=${USDA_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber: page }),
+        },
+        signal,
+        (msg) => onProgress({ phase: "storing", current: totalStored, total: grandTotal, message: msg }),
+      );
 
       const data: UsdaSearchResponse = await res.json();
       const batch = data.foods.map(mapUsdaFood);
@@ -167,9 +256,18 @@ export async function syncUsdaDatabase(
         total: grandTotal,
         message: `${dataType}... ${totalStored.toLocaleString()} / ${grandTotal.toLocaleString()} foods`,
       });
+
+      // Save progress every page so we can resume
+      await saveResumeState({ dataTypeIndex: dtIdx, pageNumber: page + 1, totalStored, grandTotal });
     }
+
+    // Reset start page for subsequent data types
+    startPage = 1;
   }
 
+  // Sync complete — clean up resume state and mark as done
+  await clearResumeState();
   await updateSyncMeta(totalStored);
+  console.log(`[USDA Sync] Complete! ${totalStored.toLocaleString()} foods saved.`);
   onProgress({ phase: "done", current: totalStored, total: totalStored, message: `Done! ${totalStored.toLocaleString()} foods saved.` });
 }

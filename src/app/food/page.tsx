@@ -5,7 +5,7 @@ import { getFoodEntries, saveFoodEntries, getGoals, saveGoals, getCustomFoods, s
 import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
 import { generateId, todayString } from "@/lib/utils";
 import { FOOD_DATABASE } from "@/lib/foodDatabase";
-import { searchUsdaLocal, getUsdaMeta, UsdaStoredFood } from "@/lib/usdaDb";
+import { searchUsdaLocal, getUsdaMeta, UsdaStoredFood, SYNC_VERSION } from "@/lib/usdaDb";
 import { Plus, Trash2, Pencil, Check, X, Star, Layers, Loader2 } from "lucide-react";
 
 type InputMode = "serving" | "grams" | "calories";
@@ -90,10 +90,10 @@ export default function FoodPage() {
     setGoals(getGoals());
     setCustomFoods(getCustomFoods());
     // Check USDA sync status (auto-sync handled by UsdaAutoSync in layout)
-    getUsdaMeta().then((meta) => setUsdaSynced(meta.synced));
+    getUsdaMeta().then((meta) => setUsdaSynced(meta.synced && meta.syncVersion >= SYNC_VERSION));
     // Re-check periodically in case background sync finishes while on this page
     const interval = setInterval(() => {
-      getUsdaMeta().then((meta) => setUsdaSynced(meta.synced));
+      getUsdaMeta().then((meta) => setUsdaSynced(meta.synced && meta.syncVersion >= SYNC_VERSION));
     }, 5000);
     return () => clearInterval(interval);
   }, []);

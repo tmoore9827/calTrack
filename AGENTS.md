@@ -236,37 +236,28 @@ The cardio page provides these at-a-glance analytics:
 3. Use `page.goto("/route")` to navigate (baseURL is localhost:3000)
 4. Run with `npm run test:e2e`
 
-## TODO — Fix USDA Auto-Sync (not downloading on deployed site)
+## TODO — USDA Auto-Sync improvements
 
-**Problem:** The `UsdaAutoSync` component runs on first page load but silently fails on the deployed Vercel site. The USDA API is reachable from the browser (confirmed), but IndexedDB never gets populated. The `DEMO_KEY` has a 30 requests/hour rate limit, and the full sync requires ~2000+ API calls — so it hits the rate limit almost immediately and the silent `catch(() => {})` swallows the error.
+**Completed fixes:**
 
-**Steps to fix:**
+1. ~~Add error logging to UsdaAutoSync~~ — Done. `console.warn` on failure, `console.log` on sync start/resume.
+2. ~~Add retry logic with rate-limit handling~~ — Done. `fetchWithRetry()` detects 429s and waits 61s, retries 5xx with exponential backoff, handles network errors.
+3. ~~Add resumable sync~~ — Done. Progress saved to IndexedDB `resumeState` after each page. If the tab closes or rate-limit kills the sync, it resumes from the exact page on next load.
+4. ~~Add sync version to metadata~~ — Done. `SYNC_VERSION = 2` in `usdaDb.ts`. Users with old v0/v1 data automatically re-sync.
 
-1. **Add error logging to UsdaAutoSync** (`src/components/UsdaAutoSync.tsx`)
-   - Log errors to console so we can see what's failing
-   - Add a `console.warn` in the catch block at minimum
+**Remaining:**
 
-2. **Add retry logic with rate-limit handling** (`src/lib/usdaApi.ts`)
-   - Detect 429 (Too Many Requests) responses from the USDA API
-   - Add exponential backoff: wait and retry when rate-limited (e.g., 60s between retries)
-   - Save partial progress to IndexedDB so sync resumes where it left off (don't re-download pages already stored)
-   - Track which page/dataType we left off at in the `meta` store
+- **Consider getting a real USDA API key** (free, higher rate limits)
+  - Register at https://fdc.nal.usda.gov/api-guide for a proper key
+  - Replace `DEMO_KEY` in `src/lib/usdaApi.ts` line 4
+  - A real key allows 1000 requests/hour instead of 30
 
-3. **Add sync version to metadata** (`src/lib/usdaDb.ts`)
-   - Add a `syncVersion` field to the meta store (e.g., `SYNC_VERSION = 2`)
-   - If `meta.syncVersion < SYNC_VERSION`, re-sync even if `meta.synced === true`
-   - This ensures users with old cached data (before Branded foods were added) automatically re-download
-
-4. **Consider getting a real USDA API key** (free, higher rate limits)
-   - Register at https://fdc.nal.usda.gov/api-guide for a proper key
-   - Replace `DEMO_KEY` in `src/lib/usdaApi.ts` line 4
-   - A real key allows 1000 requests/hour instead of 30
-
-5. **Test the full sync flow end-to-end**
-   - Clear IndexedDB: `indexedDB.deleteDatabase("caltrack_usda")`
-   - Refresh the page and monitor console for errors
-   - Verify food count increases over time
-   - Search for "Chick-fil-A" after sync completes to confirm restaurant data
+- **Test the full sync flow end-to-end**
+  - Clear IndexedDB: `indexedDB.deleteDatabase("caltrack_usda")`
+  - Refresh the page and monitor console for `[USDA Sync]` log messages
+  - Verify food count increases over time
+  - Close and reopen the tab mid-sync to test resume
+  - Search for "Chick-fil-A" after sync completes to confirm restaurant data
 
 ## Deployment
 
