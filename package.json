@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "download-usda": "node scripts/download-usda.mjs",
     "ios:build": "next build && npx cap sync ios",
     "ios:open": "npx cap open ios",
     "ios:run": "npx cap run ios"

@@ -7,9 +7,14 @@ calTrack is a health and fitness tracking app built with Next.js 16, React 19, T
 ## Project structure
 
 ```
+scripts/
+└── download-usda.mjs        # One-time script to download USDA foods → public/data/usda-foods.json
+public/
+└── data/
+    └── usda-foods.json       # Pre-built USDA database (~30-40MB, served compressed via CDN)
 src/
 ├── app/
-│   ├── layout.tsx            # Root layout, wraps all pages with Navigation
+│   ├── layout.tsx            # Root layout, wraps all pages with Navigation + UsdaAutoSync
 │   ├── page.tsx              # Dashboard (workout notification, macro rings with inline editing, macro donut, weekly calorie bar chart, sprint PR, workout last/best summary)
 │   ├── food/page.tsx         # Food log with DB search, gram/calorie scaling, Create Meal, inline editable macro goals
 │   ├── weight/page.tsx       # Weight tracker with time range filter, weekly averages bar chart, BMI card
@@ -18,6 +23,7 @@ src/
 │   └── globals.css           # Tailwind theme and custom CSS variables
 ├── components/
 │   ├── Navigation.tsx        # 5-link nav: Dashboard, Food, Weight, Workouts, Cardio. Bottom nav (mobile) / sidebar (desktop)
+│   ├── UsdaAutoSync.tsx      # Auto-loads USDA data from static file into IndexedDB on first visit
 │   └── BarbellViz.tsx        # Barbell plate loading visualization
 └── lib/
     ├── types.ts              # All TypeScript interfaces (FoodEntry, WeightEntry, Exercise, WorkoutDay, MacroGoals, CardioEntry, UserSettings, WorkoutLog, CompletedExercise, FoodDatabaseItem)
@@ -25,7 +31,7 @@ src/
     ├── utils.ts              # Helpers: generateId, todayString, formatDate, calculatePlates, calculatePace, calculateBMI, getBMICategory, getDateRangeStart, haversineDistance, linearRegression, parseGPX
     ├── healthkit.ts          # HealthKit Capacitor plugin service (Apple Watch auto-sync)
     ├── foodDatabase.ts       # Static array of ~140 common foods with macro data and servingGrams (FoodDatabaseItem[])
-    ├── usdaApi.ts            # USDA FoodData Central API client — paginated bulk download of SR Legacy + Foundation + Branded foods
+    ├── usdaApi.ts            # Fetches pre-built USDA JSON from CDN and populates IndexedDB
     └── usdaDb.ts             # IndexedDB storage and local search for USDA foods (caltrack_usda database)
 native/ios/
 ├── HealthKitPlugin.swift     # Custom Capacitor plugin: reads running workouts from Apple Health
@@ -47,6 +53,7 @@ playwright.config.ts          # Playwright config (chromium + mobile, dev server
 | `npm run lint`       | Run ESLint                       | Run before committing                      |
 | `npm run test:e2e`   | Run Playwright E2E tests         | Requires `npx playwright install` first    |
 | `npm run test:e2e:ui`| Run Playwright in interactive UI | Opens visual test runner                   |
+| `npm run download-usda` | Download USDA foods → static JSON | One-time; needs `USDA_API_KEY` env var  |
 | `npm run ios:build`  | Build static + sync to iOS       | Runs `next build` then `cap sync ios`      |
 | `npm run ios:open`   | Open Xcode project               | Requires macOS + Xcode installed           |
 | `npm run ios:run`    | Build & run on iOS device/sim    | Requires macOS + Xcode installed           |
@@ -125,7 +132,8 @@ Dark theme with green accent. Key color variables:
 
 ## Environment variables
 
-None required. The USDA FDC API uses a free `DEMO_KEY` (hardcoded in `usdaApi.ts`). Users can optionally replace it with their own key from https://fdc.nal.usda.gov/api-guide for higher rate limits.
+None required for running the app. For regenerating the USDA food database file:
+- `USDA_API_KEY` — Free API key from https://fdc.nal.usda.gov/api-guide (1000 req/hr). Used only by the `scripts/download-usda.mjs` build script, never by end users.
 
 ## Common tasks
 
@@ -144,7 +152,7 @@ Edit CSS variables in `src/app/globals.css` under the `@theme` block.
 ### Using the food database
 The food database has three tiers:
 
-1. **USDA FoodData Central (auto-synced)** — ~400K+ foods including restaurant chains (McDonald's, Chick-fil-A, Chipotle, etc.), branded/packaged foods, and generic ingredients. Downloaded automatically into IndexedDB on first app load. Includes SR Legacy (~7K generic foods), Foundation (~400 staple foods), and Branded (~400K+ packaged/restaurant foods). Results appear with a green "USDA" badge.
+1. **USDA FoodData Central (pre-built static file)** — ~400K+ foods including restaurant chains (McDonald's, Chick-fil-A, Chipotle, etc.), branded/packaged foods, and generic ingredients. Served as a single static JSON file from Vercel CDN and auto-loaded into IndexedDB on first app load (~5-15 seconds). Includes SR Legacy (~7K generic foods), Foundation (~400 staple foods), and Branded (~400K+ packaged/restaurant foods). Results appear with a green "USDA" badge.
 
 2. **Built-in database** — Static array of ~140 common foods in `src/lib/foodDatabase.ts`. Each entry has: name, calories, protein, carbs, fat, serving, servingGrams, and category. The `servingGrams` field enables gram-based scaling.
 
@@ -155,24 +163,38 @@ Categories: protein, legume, dairy, grain, fruit, vegetable, snack, beverage, me
 To add built-in foods, add entries to the `FOOD_DATABASE` array. Users can also save custom foods via the "Save to My Foods" button.
 
 ### USDA FoodData Central integration
-The app automatically downloads the full USDA food database on first load. No user action required.
+The USDA food database is pre-built as a static JSON file and served from Vercel's CDN. No per-user API calls — every user gets instant access.
 
 **How it works:**
-- On first visit to the Food Log page, the app checks IndexedDB for existing USDA data
-- If not synced, it automatically begins downloading all foods from the USDA FDC API in the background
-- A progress banner shows download status (non-blocking — users can still use the app)
-- Data is stored in IndexedDB (`caltrack_usda` database) — persists across sessions
-- After sync, all food searches include USDA results instantly with no API calls
+- Developer runs `USDA_API_KEY=xxx npm run download-usda` once to generate `public/data/usda-foods.json`
+- On first app load, `UsdaAutoSync` fetches this single static file from the CDN (~5-8 MB compressed)
+- Data is parsed and stored in IndexedDB in batches (~5-15 seconds total)
+- Data persists across sessions — subsequent visits skip the download entirely
+- `SYNC_VERSION` in `usdaDb.ts` triggers automatic re-sync when the data file is updated
 
 **Architecture:**
-- `src/lib/usdaApi.ts` — API client that paginates through all USDA foods (SR Legacy + Foundation + Branded) at 200 items/page and stores them via `usdaDb.ts`
-- `src/lib/usdaDb.ts` — IndexedDB wrapper with `openDb()`, `storeUsdaFoods()`, `searchUsdaLocal()`, `getUsdaMeta()`, `clearUsdaDb()`
-- Uses the free `DEMO_KEY` API key (30 req/hr limit). Full sync requires ~2000+ API calls so it takes time on first load
-- The sync modal (accessible by tapping the synced food count subtitle) allows re-syncing or clearing the database
+- `scripts/download-usda.mjs` — Node script that downloads all USDA foods via the FDC API and outputs compact JSON. Run once by the developer, output committed to repo
+- `public/data/usda-foods.json` — Pre-built database in compact array-of-arrays format. Served via Vercel CDN with automatic gzip/brotli compression
+- `src/lib/usdaApi.ts` — Fetches the static file and stores foods in IndexedDB in batches of 5000
+- `src/lib/usdaDb.ts` — IndexedDB wrapper with `storeUsdaFoods()`, `searchUsdaLocal()`, `getUsdaMeta()`, `clearUsdaDb()`
+- `src/components/UsdaAutoSync.tsx` — Runs on first page load in the root layout, checks version, triggers sync if needed
+
+**Compact data format:**
+```json
+{ "v": 2, "foods": [[fdcId, "Name", calories, protein, carbs, fat, "serving", servingGrams, "category"], ...] }
+```
+
+**Regenerating the database:**
+```bash
+# Get a free API key at https://fdc.nal.usda.gov/api-guide
+USDA_API_KEY=your_key_here npm run download-usda
+# Takes ~2 hours with a real key (1000 req/hr). Outputs public/data/usda-foods.json
+# Commit the output, bump SYNC_VERSION in usdaDb.ts, push — all users auto-update
+```
 
 **Data flow:**
-1. USDA API → `mapUsdaFood()` extracts calories/protein/carbs/fat (nutrient IDs 1008/1003/1004/1005) and scales from per-100g to serving size
-2. Mapped foods stored in IndexedDB with `nameLower` field for search indexing
+1. CDN → single JSON file → `expandFood()` converts compact arrays to `UsdaStoredFood` objects
+2. Stored in IndexedDB with `nameLower` field for search indexing
 3. `searchUsdaLocal()` does a full cursor scan with substring matching (fast enough for ~400K items)
 
 ### Food entry scaling (gram/calorie cycling)
@@ -235,6 +257,49 @@ The cardio page provides these at-a-glance analytics:
 2. Import `{ test, expect } from "@playwright/test"`
 3. Use `page.goto("/route")` to navigate (baseURL is localhost:3000)
 4. Run with `npm run test:e2e`
+
+## TODO — USDA food database
+
+- **Generate `public/data/usda-foods.json`** — The static data file hasn't been generated yet. Run:
+  ```bash
+  USDA_API_KEY=your_key npm run download-usda
+  ```
+  Get a free key at https://fdc.nal.usda.gov/api-guide (~2 hours with real key, ~67 hours with DEMO_KEY)
+
+- **Test the full sync flow end-to-end** after generating the data file:
+  - Clear IndexedDB: `indexedDB.deleteDatabase("caltrack_usda")`
+  - Refresh the page and monitor console for `[USDA Sync]` log messages
+  - Verify all ~400K foods load in ~5-15 seconds
+  - Search for "Chick-fil-A" to confirm restaurant data
+
+## TODO — Barcode scanner
+
+Add camera-based barcode scanning to the Food Log page so users can scan a product's UPC/EAN barcode and instantly look up its nutrition info.
+
+**Implementation plan:**
+
+1. **Install barcode library** — `html5-qrcode` or `quagga2` (~50KB). Works in mobile Safari & Chrome via `getUserMedia`, no native plugin needed.
+
+2. **Include UPC field in USDA data** (`scripts/download-usda.mjs`)
+   - USDA Branded foods have a `gtinUpc` field — add it to the compact format as a 10th element
+   - Regenerate `public/data/usda-foods.json` with UPC data included
+
+3. **Add UPC index to IndexedDB** (`src/lib/usdaDb.ts`)
+   - Bump `DB_VERSION` to 2, add a `upc` index on the foods store in `onupgradeneeded`
+   - Add `lookupByUpc(upc: string)` function for instant barcode → food lookup
+
+4. **Create BarcodeScanner component** (`src/components/BarcodeScanner.tsx`)
+   - Camera viewfinder modal with scan region overlay
+   - On successful scan → call `lookupByUpc()` → auto-fill the Add Food form
+   - Handle permissions (camera denied), no-match (barcode not found), and multiple matches
+   - Mobile-first: bottom-sheet modal like existing modals
+
+5. **Add scan button to Food page** (`src/app/food/page.tsx`)
+   - Add a scan icon button next to the existing Add/Meal buttons
+   - When tapped, opens BarcodeScanner modal
+   - On match, pre-fills the food exactly like selecting from search results
+
+**Files to change:** `scripts/download-usda.mjs`, `src/lib/usdaDb.ts`, `src/lib/usdaApi.ts`, `src/app/food/page.tsx`, + new `src/components/BarcodeScanner.tsx`
 
 ## Deployment
 

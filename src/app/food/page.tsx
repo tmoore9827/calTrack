@@ -5,7 +5,7 @@ import { getFoodEntries, saveFoodEntries, getGoals, saveGoals, getCustomFoods, s
 import { FoodEntry, MacroGoals, MEAL_LABELS, FoodDatabaseItem } from "@/lib/types";
 import { generateId, todayString } from "@/lib/utils";
 import { FOOD_DATABASE } from "@/lib/foodDatabase";
-import { searchUsdaLocal, getUsdaMeta, UsdaStoredFood } from "@/lib/usdaDb";
+import { searchUsdaLocal, getUsdaMeta, UsdaStoredFood, SYNC_VERSION } from "@/lib/usdaDb";
 import { Plus, Trash2, Pencil, Check, X, Star, Layers, Loader2 } from "lucide-react";
 
 type InputMode = "serving" | "grams" | "calories";
@@ -90,10 +90,10 @@ export default function FoodPage() {
     setGoals(getGoals());
     setCustomFoods(getCustomFoods());
     // Check USDA sync status (auto-sync handled by UsdaAutoSync in layout)
-    getUsdaMeta().then((meta) => setUsdaSynced(meta.synced));
+    getUsdaMeta().then((meta) => setUsdaSynced(meta.synced && meta.syncVersion >= SYNC_VERSION));
     // Re-check periodically in case background sync finishes while on this page
     const interval = setInterval(() => {
-      getUsdaMeta().then((meta) => setUsdaSynced(meta.synced));
+      getUsdaMeta().then((meta) => setUsdaSynced(meta.synced && meta.syncVersion >= SYNC_VERSION));
     }, 5000);
     return () => clearInterval(interval);
   }, []);
@@ -754,6 +754,17 @@ export default function FoodPage() {
       )}
 
       {/* Create Meal modal */}
+      {/* USDA attribution */}
+      {usdaSynced && (
+        <p className="text-[10px] text-foreground/20 text-center leading-relaxed">
+          Food data from{" "}
+          <a href="https://fdc.nal.usda.gov" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground/40">
+            USDA FoodData Central
+          </a>
+          , U.S. Department of Agriculture, Agricultural Research Service. Published under CC0 1.0.
+        </p>
+      )}
+
       {showCreateMeal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-50 p-4">
           <div className="bg-card border border-border rounded-2xl p-6 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto">
