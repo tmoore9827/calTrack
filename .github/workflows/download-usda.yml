@@ -25,21 +25,16 @@ jobs:
           ls -lh public/data/usda-foods.json
           wc -c < public/data/usda-foods.json
 
+      - name: Upload artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usda-foods
+          path: public/data/usda-foods.json
+          retention-days: 7
+
       - name: Commit and push
-        run: |
-          set -ex
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          FILE_SIZE=$(wc -c < public/data/usda-foods.json)
-          echo "File size: $FILE_SIZE bytes ($(( FILE_SIZE / 1024 / 1024 )) MB)"
-          git add public/data/usda-foods.json
-          git diff --cached --stat
-          git commit -m "Add pre-built USDA food database (400K+ foods)"
-          echo "Commit done, pushing..."
-          git remote -v
-          git log --oneline -1
-          git push origin HEAD:refs/heads/${{ github.ref_name }} 2>&1 || {
-            echo "Push failed. Trying with explicit token..."
-            git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
-            git push origin HEAD:refs/heads/${{ github.ref_name }} 2>&1
-          }
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Add pre-built USDA food database (400K+ foods)"
+          file_pattern: "public/data/usda-foods.json"
