@@ -30,7 +30,7 @@ const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
 const RATE_LIMIT_WAIT = 62_000; // 62s wait on 429
 const MAX_RETRIES = 15;
 const MAX_BACKOFF = 30_000; // Cap backoff at 30s
-const REQUEST_DELAY = 150; // 150ms between requests to avoid rate limits
+const REQUEST_DELAY = 3800; // 3.8s between requests (~947 req/hr, under the 1000/hr limit)
 const FETCH_TIMEOUT = 60_000; // 60s timeout per request
 
 if (API_KEY === "DEMO_KEY") {
@@ -43,36 +43,39 @@ function sleep(ms) {
 }
 
 async function fetchRetry(url, init) {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  let errorRetries = 0;
+  while (true) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
       const res = await fetch(url, { ...init, signal: controller.signal });
       clearTimeout(timer);
       if (res.status === 429) {
+        // Rate limits are expected — wait and retry without counting against MAX_RETRIES
         console.warn(`  Rate limited (429). Waiting ${RATE_LIMIT_WAIT / 1000}s...`);
         await sleep(RATE_LIMIT_WAIT);
         continue;
       }
-      if (res.status >= 500 && attempt < MAX_RETRIES) {
-        const wait = Math.min(2000 * Math.pow(2, attempt), MAX_BACKOFF);
-        console.warn(`  Server error ${res.status}. Retrying in ${wait / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+      if (res.status >= 500 && errorRetries < MAX_RETRIES) {
+        errorRetries++;
+        const wait = Math.min(2000 * Math.pow(2, errorRetries), MAX_BACKOFF);
+        console.warn(`  Server error ${res.status}. Retrying in ${wait / 1000}s (attempt ${errorRetries}/${MAX_RETRIES})...`);
         await sleep(wait);
         continue;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       return res;
     } catch (err) {
-      if (attempt < MAX_RETRIES) {
-        const wait = Math.min(2000 * Math.pow(2, attempt), MAX_BACKOFF);
-        console.warn(`  ${err.name === 'AbortError' ? 'Request timeout' : 'Network error'}: ${err.message}. Retrying in ${wait / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+      if (errorRetries < MAX_RETRIES) {
+        errorRetries++;
+        const wait = Math.min(2000 * Math.pow(2, errorRetries), MAX_BACKOFF);
+        console.warn(`  ${err.name === 'AbortError' ? 'Request timeout' : 'Network error'}: ${err.message}. Retrying in ${wait / 1000}s (attempt ${errorRetries}/${MAX_RETRIES})...`);
         await sleep(wait);
         continue;
       }
       throw err;
     }
   }
-  throw new Error("Max retries exceeded");
 }
 
 function extractNutrient(nutrients, id) {
