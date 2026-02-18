@@ -20,10 +20,16 @@ jobs:
       - name: Download USDA foods
         run: node --max-old-space-size=2048 scripts/download-usda.mjs
 
+      - name: Check output
+        run: |
+          ls -lh public/data/usda-foods.json
+          wc -c < public/data/usda-foods.json
+
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add public/data/usda-foods.json
+          git diff --cached --stat
           git commit -m "Add pre-built USDA food database (400K+ foods)"
-          git push
+          git push origin HEAD:${{ github.ref_name }}
