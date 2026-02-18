@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Download the full USDA FoodData Central database via bulk CSV download
+ * Download the full USDA FoodData Central database via bulk CSV downloads
  * and output a compact JSON file for serving as a static asset.
  *
- * Uses bulk CSV downloads (no API key needed) instead of paginated API calls.
+ * Downloads individual dataset CSVs (no API key needed) instead of paginated API calls.
  * This avoids all rate limiting issues and completes in ~5-10 minutes.
  *
  * Usage:
@@ -12,7 +12,7 @@
  * Output: public/data/usda-foods.json (~30-40MB, serves compressed via CDN)
  */
 
-import { mkdirSync, writeFileSync, createReadStream, rmSync, existsSync } from "fs";
+import { mkdirSync, writeFileSync, createReadStream, rmSync, readdirSync, statSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { execSync } from "child_process";
@@ -22,17 +22,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT_PATH = resolve(__dirname, "../public/data/usda-foods.json");
 const TEMP_DIR = resolve(__dirname, "../.usda-temp");
 
-// Bulk download URL — full CSV dataset (all food types in one archive)
-// Try multiple release dates (newest first) in case one is unavailable
-const RELEASE_DATES = ["2024-10-31", "2024-04-28", "2025-04-28"];
+// Individual dataset download URLs (much smaller than full download)
+const RELEASE_DATES = ["2024-10-31", "2024-04-28"];
 const BASE_URL = "https://fdc.nal.usda.gov/fdc-datasets";
+const DATASETS = [
+  { name: "SR Legacy", slug: "sr_legacy_food", dataType: "sr_legacy_food" },
+  { name: "Foundation", slug: "foundation_food", dataType: "foundation_food" },
+  { name: "Branded", slug: "branded_food", dataType: "branded_food" },
+];
 
 // Nutrient IDs we care about
 const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
 const NUTRIENT_IDS = new Set([ENERGY, PROTEIN, FAT, CARBS]);
-
-// Data types to include
-const DATA_TYPES = new Set(["sr_legacy_food", "foundation_food", "branded_food"]);
 
 function mapCategory(cat) {
   if (!cat) return "usda";
@@ -92,6 +93,7 @@ async function readCSV(filePath, fn) {
     crlfDelay: Infinity,
   });
   let headers = null;
+  let count = 0;
   for await (const line of rl) {
     if (!headers) {
       headers = parseCSVLine(line).map((h) => h.replace(/^\uFEFF/, "").trim());
@@ -103,14 +105,17 @@ async function readCSV(filePath, fn) {
       row[headers[i]] = fields[i] || "";
     }
     fn(row);
+    count++;
   }
+  return count;
 }
 
-/** Find a file recursively in a directory */
+/** Find a CSV file in a directory (recursively) */
 function findFile(dir, name) {
   try {
     const result = execSync(`find "${dir}" -name "${name}" -type f`, {
       encoding: "utf8",
+      timeout: 10_000,
     }).trim().split("\n")[0];
     return result || null;
   } catch {
@@ -118,150 +123,182 @@ function findFile(dir, name) {
   }
 }
 
-async function main() {
-  const startTime = Date.now();
-
-  // Setup temp directory
-  mkdirSync(TEMP_DIR, { recursive: true });
-
-  const zipPath = join(TEMP_DIR, "usda-full.zip");
-  const extractDir = join(TEMP_DIR, "extracted");
-
-  // Download full CSV zip
-  console.log("Downloading USDA FoodData Central bulk CSV...");
-  let downloaded = false;
-  for (const date of RELEASE_DATES) {
-    const url = `${BASE_URL}/FoodData_Central_csv_${date}.zip`;
-    console.log(`  Trying ${url}...`);
-    try {
-      execSync(
-        `curl -fSL --retry 3 --retry-delay 5 -o "${zipPath}" "${url}"`,
-        { stdio: "inherit", timeout: 600_000 }
-      );
-      downloaded = true;
-      console.log(`  Downloaded successfully.`);
-      break;
-    } catch (err) {
-      console.warn(`  Failed for date ${date}, trying next...`);
+/** List directory contents for debugging */
+function listDir(dir, depth = 0) {
+  try {
+    const entries = readdirSync(dir);
+    for (const entry of entries) {
+      const fullPath = join(dir, entry);
+      const stat = statSync(fullPath);
+      console.log(`${"  ".repeat(depth)}${stat.isDirectory() ? "[DIR]" : ""} ${entry}`);
+      if (stat.isDirectory() && depth < 2) {
+        listDir(fullPath, depth + 1);
+      }
     }
-  }
-  if (!downloaded) {
-    throw new Error("Could not download USDA data for any release date");
-  }
+  } catch {}
+}
 
-  // Extract
-  console.log("Extracting ZIP...");
+/** Download a dataset zip, extract it, return the CSV directory path */
+function downloadAndExtract(slug, date, extractDir) {
+  const url = `${BASE_URL}/FoodData_Central_${slug}_csv_${date}.zip`;
+  const zipPath = join(TEMP_DIR, `${slug}.zip`);
+
+  console.log(`  Downloading ${url}...`);
+  execSync(`curl -fSL --retry 3 --retry-delay 5 -o "${zipPath}" "${url}"`, {
+    stdio: "inherit",
+    timeout: 600_000,
+  });
+
+  const zipSizeMB = (statSync(zipPath).size / 1024 / 1024).toFixed(1);
+  console.log(`  Downloaded (${zipSizeMB} MB). Extracting...`);
+
   mkdirSync(extractDir, { recursive: true });
   execSync(`unzip -o "${zipPath}" -d "${extractDir}"`, {
     stdio: "inherit",
     timeout: 300_000,
   });
-  console.log("Extracted.");
 
-  // Find the directory containing CSV files
-  const foodCsvPath = findFile(extractDir, "food.csv");
-  if (!foodCsvPath) throw new Error("Could not find food.csv in extracted data");
-  const csvDir = dirname(foodCsvPath);
-  console.log(`CSV directory: ${csvDir}`);
+  // Delete zip to save disk space
+  rmSync(zipPath, { force: true });
 
-  // 1. Read food categories
-  console.log("\n1. Reading food categories...");
-  const categories = {}; // id -> description
-  const catFile = findFile(csvDir, "food_category.csv");
-  if (catFile) {
-    await readCSV(catFile, (row) => {
-      categories[row.id] = row.description;
-    });
-    console.log(`   ${Object.keys(categories).length} categories`);
-  } else {
-    console.warn("   food_category.csv not found, using default categories");
-  }
+  // Debug: show extracted contents
+  console.log("  Extracted contents:");
+  listDir(extractDir, 1);
 
-  // 2. Read foods (filter to our data types)
-  console.log("2. Reading foods...");
-  const foods = {}; // fdc_id -> { description, dataType, categoryId }
-  await readCSV(foodCsvPath, (row) => {
-    if (DATA_TYPES.has(row.data_type)) {
+  return extractDir;
+}
+
+async function main() {
+  const startTime = Date.now();
+  const allFoods = [];
+
+  // Setup temp directory
+  rmSync(TEMP_DIR, { recursive: true, force: true });
+  mkdirSync(TEMP_DIR, { recursive: true });
+
+  // Process each dataset
+  for (const dataset of DATASETS) {
+    console.log(`\n=== ${dataset.name} ===`);
+
+    const extractDir = join(TEMP_DIR, dataset.slug);
+    let downloaded = false;
+
+    // Try each release date
+    for (const date of RELEASE_DATES) {
+      try {
+        downloadAndExtract(dataset.slug, date, extractDir);
+        downloaded = true;
+        break;
+      } catch (err) {
+        console.warn(`  Failed for date ${date}: ${err.message}`);
+        rmSync(extractDir, { recursive: true, force: true });
+      }
+    }
+    if (!downloaded) {
+      throw new Error(`Could not download ${dataset.name} for any release date`);
+    }
+
+    // Find CSV files
+    const foodCsv = findFile(extractDir, "food.csv");
+    if (!foodCsv) {
+      console.error("  Could not find food.csv! Directory contents:");
+      listDir(extractDir);
+      throw new Error(`food.csv not found for ${dataset.name}`);
+    }
+    const csvDir = dirname(foodCsv);
+    console.log(`  CSV directory: ${csvDir}`);
+
+    // Read food categories (if available)
+    const categories = {};
+    const catFile = findFile(csvDir, "food_category.csv");
+    if (catFile) {
+      await readCSV(catFile, (row) => {
+        categories[row.id] = row.description;
+      });
+      console.log(`  ${Object.keys(categories).length} categories`);
+    }
+
+    // Read foods
+    const foods = {};
+    const foodCount = await readCSV(foodCsv, (row) => {
       foods[row.fdc_id] = {
         description: row.description,
-        dataType: row.data_type,
         categoryId: row.food_category_id,
       };
-    }
-  });
-  console.log(`   ${Object.keys(foods).length} foods`);
-
-  // 3. Read branded_food for serving sizes
-  console.log("3. Reading branded food serving sizes...");
-  const servings = {}; // fdc_id -> { size, unit }
-  const brandedFile = findFile(csvDir, "branded_food.csv");
-  if (brandedFile) {
-    await readCSV(brandedFile, (row) => {
-      if (row.serving_size && parseFloat(row.serving_size) > 0) {
-        servings[row.fdc_id] = {
-          size: parseFloat(row.serving_size),
-          unit: (row.serving_size_unit || "g").toLowerCase(),
-        };
-      }
     });
-    console.log(`   ${Object.keys(servings).length} serving sizes`);
-  } else {
-    console.warn("   branded_food.csv not found, using defaults");
-  }
+    console.log(`  ${Object.keys(foods).length} foods (from ${foodCount} rows)`);
 
-  // 4. Read nutrients (only the 4 we care about, only for our foods)
-  console.log("4. Reading food nutrients (largest file, may take a few minutes)...");
-  const nutrients = {}; // fdc_id -> { 1008: cal, 1003: protein, ... }
-  let nutrientCount = 0;
-  const nutrientFile = findFile(csvDir, "food_nutrient.csv");
-  if (!nutrientFile) throw new Error("food_nutrient.csv not found");
-  await readCSV(nutrientFile, (row) => {
-    const nutrientId = parseInt(row.nutrient_id);
-    if (!NUTRIENT_IDS.has(nutrientId)) return;
-    const fdcId = row.fdc_id;
-    if (!foods[fdcId]) return; // skip foods we don't care about
-    if (!nutrients[fdcId]) nutrients[fdcId] = {};
-    nutrients[fdcId][nutrientId] = parseFloat(row.amount) || 0;
-    nutrientCount++;
-    if (nutrientCount % 500_000 === 0) {
-      console.log(`   ${(nutrientCount / 1_000_000).toFixed(1)}M nutrient rows matched...`);
+    // Read serving sizes for branded foods
+    const servings = {};
+    if (dataset.dataType === "branded_food") {
+      const brandedFile = findFile(csvDir, "branded_food.csv");
+      if (brandedFile) {
+        await readCSV(brandedFile, (row) => {
+          if (row.serving_size && parseFloat(row.serving_size) > 0) {
+            servings[row.fdc_id] = {
+              size: parseFloat(row.serving_size),
+              unit: (row.serving_size_unit || "g").toLowerCase(),
+            };
+          }
+        });
+        console.log(`  ${Object.keys(servings).length} serving sizes`);
+      }
     }
-  });
-  console.log(`   ${nutrientCount.toLocaleString()} nutrient values loaded`);
 
-  // 5. Build compact output
-  console.log("\n5. Building output...");
-  const allFoods = [];
-  for (const [fdcId, food] of Object.entries(foods)) {
-    const n = nutrients[fdcId] || {};
-    const cal100 = n[ENERGY] || 0;
-    const pro100 = n[PROTEIN] || 0;
-    const carb100 = n[CARBS] || 0;
-    const fat100 = n[FAT] || 0;
+    // Read nutrients (only the 4 we need, only for our foods)
+    const nutrients = {};
+    let nutrientMatches = 0;
+    const nutrientFile = findFile(csvDir, "food_nutrient.csv");
+    if (!nutrientFile) throw new Error(`food_nutrient.csv not found for ${dataset.name}`);
+    await readCSV(nutrientFile, (row) => {
+      const nutrientId = parseInt(row.nutrient_id);
+      if (!NUTRIENT_IDS.has(nutrientId)) return;
+      const fdcId = row.fdc_id;
+      if (!foods[fdcId]) return;
+      if (!nutrients[fdcId]) nutrients[fdcId] = {};
+      nutrients[fdcId][nutrientId] = parseFloat(row.amount) || 0;
+      nutrientMatches++;
+    });
+    console.log(`  ${nutrientMatches.toLocaleString()} nutrient values matched`);
 
-    const srv = servings[fdcId];
-    const sg = srv ? Math.round(srv.size) : 100;
-    const unit = srv ? srv.unit : "g";
-    const serving = unit === "ml" ? `${sg}ml` : `${sg}g`;
-    const scale = sg / 100;
+    // Build output for this dataset
+    let datasetCount = 0;
+    for (const [fdcId, food] of Object.entries(foods)) {
+      const n = nutrients[fdcId] || {};
+      const cal100 = n[ENERGY] || 0;
+      const pro100 = n[PROTEIN] || 0;
+      const carb100 = n[CARBS] || 0;
+      const fat100 = n[FAT] || 0;
 
-    const catDesc = categories[food.categoryId] || "";
+      const srv = servings[fdcId];
+      const sg = srv ? Math.round(srv.size) : 100;
+      const unit = srv ? srv.unit : "g";
+      const serving = unit === "ml" ? `${sg}ml` : `${sg}g`;
+      const scale = sg / 100;
 
-    allFoods.push([
-      parseInt(fdcId),
-      titleCase(food.description),
-      Math.round(cal100 * scale),
-      Math.round(pro100 * scale * 10) / 10,
-      Math.round(carb100 * scale * 10) / 10,
-      Math.round(fat100 * scale * 10) / 10,
-      serving,
-      sg,
-      mapCategory(catDesc),
-    ]);
+      const catDesc = categories[food.categoryId] || "";
+
+      allFoods.push([
+        parseInt(fdcId),
+        titleCase(food.description),
+        Math.round(cal100 * scale),
+        Math.round(pro100 * scale * 10) / 10,
+        Math.round(carb100 * scale * 10) / 10,
+        Math.round(fat100 * scale * 10) / 10,
+        serving,
+        sg,
+        mapCategory(catDesc),
+      ]);
+      datasetCount++;
+    }
+    console.log(`  Added ${datasetCount.toLocaleString()} foods (${allFoods.length.toLocaleString()} total)`);
+
+    // Cleanup this dataset's extracted files to save memory/disk
+    rmSync(extractDir, { recursive: true, force: true });
   }
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-  console.log(`Processed ${allFoods.length.toLocaleString()} foods in ${elapsed} minutes`);
+  console.log(`\nProcessed ${allFoods.length.toLocaleString()} foods in ${elapsed} minutes`);
 
   // Write compact JSON
   mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
@@ -272,8 +309,7 @@ async function main() {
   console.log(`Written to ${OUTPUT_PATH} (${sizeMB} MB)`);
   console.log("Vercel will serve this gzip/brotli compressed (~5-8 MB over the wire)");
 
-  // Cleanup temp files
-  console.log("Cleaning up temp files...");
+  // Final cleanup
   rmSync(TEMP_DIR, { recursive: true, force: true });
   console.log("Done!");
 }
