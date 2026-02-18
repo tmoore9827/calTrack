@@ -3,8 +3,8 @@
  * Download the full USDA FoodData Central database via bulk CSV downloads
  * and output a compact JSON file for serving as a static asset.
  *
- * Downloads individual dataset CSVs (no API key needed) instead of paginated API calls.
- * Uses awk pre-filtering on the massive nutrient CSV to avoid memory issues.
+ * Memory-efficient: streams food.csv → output, never holding all foods in RAM.
+ * Pre-filters nutrient CSV with awk to keep only our 4 nutrient IDs.
  *
  * Usage:
  *   node scripts/download-usda.mjs
@@ -12,7 +12,7 @@
  * Output: public/data/usda-foods.json (~30-40MB, serves compressed via CDN)
  */
 
-import { mkdirSync, writeFileSync, createReadStream, rmSync, readdirSync, statSync } from "fs";
+import { mkdirSync, createReadStream, createWriteStream, rmSync, statSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { execSync } from "child_process";
@@ -22,7 +22,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT_PATH = resolve(__dirname, "../public/data/usda-foods.json");
 const TEMP_DIR = resolve(__dirname, "../.usda-temp");
 
-// Individual dataset download URLs (each dataset has its own release date)
 const BASE_URL = "https://fdc.nal.usda.gov/fdc-datasets";
 const DATASETS = [
   { name: "SR Legacy", file: "FoodData_Central_sr_legacy_food_csv_2018-04.zip", dataType: "sr_legacy_food" },
@@ -30,7 +29,6 @@ const DATASETS = [
   { name: "Branded", file: "FoodData_Central_branded_food_csv_2024-10-31.zip", dataType: "branded_food" },
 ];
 
-// Nutrient IDs we care about
 const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
 const NUTRIENT_IDS = [ENERGY, PROTEIN, FAT, CARBS];
 const NUTRIENT_SET = new Set(NUTRIENT_IDS);
@@ -86,28 +84,30 @@ function parseCSVLine(line) {
   return fields;
 }
 
-/** Stream-read a CSV file, calling fn(row) for each data row */
-async function readCSV(filePath, fn) {
+/**
+ * Stream-read a CSV, calling fn(fields, headerIndex) for each data row.
+ * Returns header index map and row count.
+ * Using raw field arrays instead of building objects saves significant memory.
+ */
+async function streamCSV(filePath, fn) {
   const rl = createInterface({
     input: createReadStream(filePath, "utf8"),
     crlfDelay: Infinity,
   });
-  let headers = null;
+  let headerIdx = null;
   let count = 0;
   for await (const line of rl) {
-    if (!headers) {
-      headers = parseCSVLine(line).map((h) => h.replace(/^\uFEFF/, "").trim());
+    if (!headerIdx) {
+      const headers = parseCSVLine(line).map((h) => h.replace(/^\uFEFF/, "").trim());
+      headerIdx = {};
+      for (let i = 0; i < headers.length; i++) headerIdx[headers[i]] = i;
       continue;
     }
     const fields = parseCSVLine(line);
-    const row = {};
-    for (let i = 0; i < headers.length; i++) {
-      row[headers[i]] = fields[i] || "";
-    }
-    fn(row);
+    fn(fields, headerIdx);
     count++;
   }
-  return count;
+  return { headerIdx, count };
 }
 
 /** Find a CSV file in a directory (recursively) */
@@ -125,10 +125,9 @@ function findFile(dir, name) {
 
 /**
  * Pre-filter food_nutrient.csv using awk to only keep our 4 nutrient IDs.
- * This reduces ~60M rows to ~1.6M rows, preventing OOM when parsing in Node.
+ * This reduces ~60M rows to ~1.6M rows, preventing OOM when parsing.
  */
 function prefilterNutrientCSV(inputPath, outputPath) {
-  // Find the column index for nutrient_id (awk is 1-indexed)
   const header = execSync(`head -1 "${inputPath}"`, { encoding: "utf8" }).trim();
   const cols = header.replace(/^\uFEFF/, "").split(",").map((h) => h.replace(/"/g, "").trim());
   const nutrientColIdx = cols.indexOf("nutrient_id") + 1; // awk 1-indexed
@@ -149,7 +148,6 @@ function prefilterNutrientCSV(inputPath, outputPath) {
   console.log(`  Filtered: ${origSize} MB → ${filtSize} MB`);
 }
 
-/** Download a dataset zip, extract it */
 function downloadAndExtract(file, extractDir) {
   const url = `${BASE_URL}/${file}`;
   const zipPath = join(TEMP_DIR, file);
@@ -169,20 +167,23 @@ function downloadAndExtract(file, extractDir) {
     timeout: 300_000,
   });
 
-  // Delete zip to save disk space
   rmSync(zipPath, { force: true });
   console.log("  Extracted.");
 }
 
 async function main() {
   const startTime = Date.now();
-  const allFoods = [];
+  let totalFoods = 0;
 
-  // Setup temp directory
   rmSync(TEMP_DIR, { recursive: true, force: true });
   mkdirSync(TEMP_DIR, { recursive: true });
+  mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
 
-  // Process each dataset
+  // Open output stream — write JSON header, then stream entries
+  const out = createWriteStream(OUTPUT_PATH, "utf8");
+  out.write('{"v":2,"foods":[');
+  let firstEntry = true;
+
   for (const dataset of DATASETS) {
     console.log(`\n=== ${dataset.name} ===`);
     const datasetStart = Date.now();
@@ -190,97 +191,90 @@ async function main() {
     const extractDir = join(TEMP_DIR, dataset.dataType);
     downloadAndExtract(dataset.file, extractDir);
 
-    // Find CSV files
     const foodCsv = findFile(extractDir, "food.csv");
-    if (!foodCsv) {
-      throw new Error(`food.csv not found for ${dataset.name}`);
-    }
+    if (!foodCsv) throw new Error(`food.csv not found for ${dataset.name}`);
     const csvDir = dirname(foodCsv);
 
-    // Read food categories (if available)
-    const categories = {};
+    // Step 1: Read categories (small, ~50 entries)
+    const categories = new Map();
     const catFile = findFile(csvDir, "food_category.csv");
     if (catFile) {
-      await readCSV(catFile, (row) => {
-        categories[row.id] = row.description;
+      await streamCSV(catFile, (fields, idx) => {
+        categories.set(fields[idx.id], fields[idx.description]);
       });
-      console.log(`  ${Object.keys(categories).length} categories`);
+      console.log(`  ${categories.size} categories`);
     }
 
-    // Read foods
-    console.log("  Reading foods...");
-    const foods = {};
-    const foodCount = await readCSV(foodCsv, (row) => {
-      foods[row.fdc_id] = {
-        description: row.description,
-        categoryId: row.food_category_id,
-      };
-    });
-    console.log(`  ${Object.keys(foods).length} foods (from ${foodCount} rows)`);
-
-    // Read serving sizes for branded foods
-    const servings = {};
+    // Step 2: Read servings for branded foods (compact: fdcId → [size, unit])
+    const servings = new Map();
     if (dataset.dataType === "branded_food") {
       const brandedFile = findFile(csvDir, "branded_food.csv");
       if (brandedFile) {
         console.log("  Reading serving sizes...");
-        await readCSV(brandedFile, (row) => {
-          if (row.serving_size && parseFloat(row.serving_size) > 0) {
-            servings[row.fdc_id] = {
-              size: parseFloat(row.serving_size),
-              unit: (row.serving_size_unit || "g").toLowerCase(),
-            };
+        await streamCSV(brandedFile, (fields, idx) => {
+          const size = parseFloat(fields[idx.serving_size]);
+          if (size > 0) {
+            servings.set(fields[idx.fdc_id], [size, (fields[idx.serving_size_unit] || "g").toLowerCase()]);
           }
         });
-        console.log(`  ${Object.keys(servings).length} serving sizes`);
+        console.log(`  ${servings.size} serving sizes`);
       }
     }
 
-    // Pre-filter the nutrient CSV to only our 4 nutrient IDs (reduces ~60M to ~1.6M rows)
+    // Step 3: Pre-filter nutrient CSV with awk, then read into compact Map
+    // Key: fdcId string, Value: Float64Array(4) → [cal, protein, fat, carbs]
     const nutrientFile = findFile(csvDir, "food_nutrient.csv");
     if (!nutrientFile) throw new Error(`food_nutrient.csv not found for ${dataset.name}`);
 
     const filteredPath = join(TEMP_DIR, `${dataset.dataType}_nutrients_filtered.csv`);
     prefilterNutrientCSV(nutrientFile, filteredPath);
 
-    // Now read the much smaller filtered nutrient file
     console.log("  Reading filtered nutrients...");
-    const nutrients = {};
+    const nutrients = new Map();
     let nutrientMatches = 0;
-    await readCSV(filteredPath, (row) => {
-      const nutrientId = parseInt(row.nutrient_id);
+
+    await streamCSV(filteredPath, (fields, idx) => {
+      const nutrientId = parseInt(fields[idx.nutrient_id]);
       if (!NUTRIENT_SET.has(nutrientId)) return;
-      const fdcId = row.fdc_id;
-      if (!foods[fdcId]) return;
-      if (!nutrients[fdcId]) nutrients[fdcId] = {};
-      nutrients[fdcId][nutrientId] = parseFloat(row.amount) || 0;
+      const fdcId = fields[idx.fdc_id];
+      let arr = nutrients.get(fdcId);
+      if (!arr) {
+        arr = new Float64Array(4); // [cal, protein, fat, carbs]
+        nutrients.set(fdcId, arr);
+      }
+      const amount = parseFloat(fields[idx.amount]) || 0;
+      if (nutrientId === ENERGY) arr[0] = amount;
+      else if (nutrientId === PROTEIN) arr[1] = amount;
+      else if (nutrientId === FAT) arr[2] = amount;
+      else if (nutrientId === CARBS) arr[3] = amount;
       nutrientMatches++;
     });
     console.log(`  ${nutrientMatches.toLocaleString()} nutrient values matched`);
-
-    // Cleanup filtered file
     rmSync(filteredPath, { force: true });
 
-    // Build output for this dataset
+    // Step 4: Stream food.csv → write directly to output (never hold all foods in memory)
+    console.log("  Streaming foods to output...");
     let datasetCount = 0;
-    for (const [fdcId, food] of Object.entries(foods)) {
-      const n = nutrients[fdcId] || {};
-      const cal100 = n[ENERGY] || 0;
-      const pro100 = n[PROTEIN] || 0;
-      const carb100 = n[CARBS] || 0;
-      const fat100 = n[FAT] || 0;
 
-      const srv = servings[fdcId];
-      const sg = srv ? Math.round(srv.size) : 100;
-      const unit = srv ? srv.unit : "g";
+    await streamCSV(foodCsv, (fields, idx) => {
+      const fdcId = fields[idx.fdc_id];
+      const n = nutrients.get(fdcId);
+      // Skip foods with no nutrient data
+      if (!n) return;
+
+      const cal100 = n[0], pro100 = n[1], fat100 = n[2], carb100 = n[3];
+
+      const srv = servings.get(fdcId);
+      const sg = srv ? Math.round(srv[0]) : 100;
+      const unit = srv ? srv[1] : "g";
       const serving = unit === "ml" ? `${sg}ml` : `${sg}g`;
       const scale = sg / 100;
 
-      const catDesc = categories[food.categoryId] || "";
+      const catDesc = categories.get(fields[idx.food_category_id]) || "";
 
-      allFoods.push([
+      const entry = JSON.stringify([
         parseInt(fdcId),
-        titleCase(food.description),
+        titleCase(fields[idx.description]),
         Math.round(cal100 * scale),
         Math.round(pro100 * scale * 10) / 10,
         Math.round(carb100 * scale * 10) / 10,
@@ -289,29 +283,37 @@ async function main() {
         sg,
         mapCategory(catDesc),
       ]);
+
+      if (!firstEntry) out.write(",");
+      out.write(entry);
+      firstEntry = false;
       datasetCount++;
-    }
+    });
 
+    totalFoods += datasetCount;
     const dsElapsed = ((Date.now() - datasetStart) / 1000).toFixed(0);
-    console.log(`  Added ${datasetCount.toLocaleString()} foods in ${dsElapsed}s (${allFoods.length.toLocaleString()} total)`);
+    console.log(`  Added ${datasetCount.toLocaleString()} foods in ${dsElapsed}s (${totalFoods.toLocaleString()} total)`);
 
-    // Cleanup this dataset's extracted files to save disk
+    // Free memory before next dataset
+    nutrients.clear();
+    servings.clear();
+    categories.clear();
     rmSync(extractDir, { recursive: true, force: true });
   }
 
+  // Close JSON
+  out.write("]}");
+  await new Promise((resolve, reject) => {
+    out.end(() => resolve());
+    out.on("error", reject);
+  });
+
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-  console.log(`\nProcessed ${allFoods.length.toLocaleString()} foods in ${elapsed} minutes`);
-
-  // Write compact JSON
-  mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
-  const output = JSON.stringify({ v: 2, foods: allFoods });
-  writeFileSync(OUTPUT_PATH, output);
-
-  const sizeMB = (Buffer.byteLength(output) / 1024 / 1024).toFixed(1);
+  const sizeMB = (statSync(OUTPUT_PATH).size / 1024 / 1024).toFixed(1);
+  console.log(`\nProcessed ${totalFoods.toLocaleString()} foods in ${elapsed} minutes`);
   console.log(`Written to ${OUTPUT_PATH} (${sizeMB} MB)`);
   console.log("Vercel will serve this gzip/brotli compressed (~5-8 MB over the wire)");
 
-  // Final cleanup
   rmSync(TEMP_DIR, { recursive: true, force: true });
   console.log("Done!");
 }
