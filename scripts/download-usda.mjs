@@ -1,87 +1,38 @@
 #!/usr/bin/env node
 /**
- * Download the full USDA FoodData Central database and output a compact JSON file
- * for serving as a static asset. Run once as a developer, commit the output.
+ * Download the full USDA FoodData Central database via bulk CSV download
+ * and output a compact JSON file for serving as a static asset.
+ *
+ * Uses bulk CSV downloads (no API key needed) instead of paginated API calls.
+ * This avoids all rate limiting issues and completes in ~5-10 minutes.
  *
  * Usage:
- *   USDA_API_KEY=your_key node scripts/download-usda.mjs
- *
- * Get a free API key at: https://fdc.nal.usda.gov/api-guide
- * (The DEMO_KEY only allows 30 req/hr — a real key allows 1000 req/hr)
+ *   node scripts/download-usda.mjs
  *
  * Output: public/data/usda-foods.json (~30-40MB, serves compressed via CDN)
  */
 
-import { writeFileSync, mkdirSync } from "fs";
-import { resolve, dirname } from "path";
+import { mkdirSync, writeFileSync, createReadStream, rmSync, existsSync } from "fs";
+import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
+import { createInterface } from "readline";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT_PATH = resolve(__dirname, "../public/data/usda-foods.json");
+const TEMP_DIR = resolve(__dirname, "../.usda-temp");
 
-const API_BASE = "https://api.nal.usda.gov/fdc/v1";
-const API_KEY = process.env.USDA_API_KEY || "DEMO_KEY";
-const PAGE_SIZE = 200;
-const DATA_TYPES = ["SR Legacy", "Foundation", "Branded"];
+// Bulk download URL — full CSV dataset (all food types in one archive)
+// Try multiple release dates (newest first) in case one is unavailable
+const RELEASE_DATES = ["2024-10-31", "2024-04-28", "2025-04-28"];
+const BASE_URL = "https://fdc.nal.usda.gov/fdc-datasets";
 
-// Nutrient IDs
+// Nutrient IDs we care about
 const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
+const NUTRIENT_IDS = new Set([ENERGY, PROTEIN, FAT, CARBS]);
 
-const RATE_LIMIT_WAIT = 62_000; // 62s wait on 429
-const MAX_RETRIES = 15;
-const MAX_BACKOFF = 30_000; // Cap backoff at 30s
-const REQUEST_DELAY = 3800; // 3.8s between requests (~947 req/hr, under the 1000/hr limit)
-const FETCH_TIMEOUT = 60_000; // 60s timeout per request
-
-if (API_KEY === "DEMO_KEY") {
-  console.warn("WARNING: Using DEMO_KEY (30 req/hr). This will take ~67 hours.");
-  console.warn("Get a free key at https://fdc.nal.usda.gov/api-guide for 1000 req/hr (~2 hrs).\n");
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function fetchRetry(url, init) {
-  let errorRetries = 0;
-  while (true) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
-      if (res.status === 429) {
-        // Rate limits are expected — wait and retry without counting against MAX_RETRIES
-        console.warn(`  Rate limited (429). Waiting ${RATE_LIMIT_WAIT / 1000}s...`);
-        await sleep(RATE_LIMIT_WAIT);
-        continue;
-      }
-      if (res.status >= 500 && errorRetries < MAX_RETRIES) {
-        errorRetries++;
-        const wait = Math.min(2000 * Math.pow(2, errorRetries), MAX_BACKOFF);
-        console.warn(`  Server error ${res.status}. Retrying in ${wait / 1000}s (attempt ${errorRetries}/${MAX_RETRIES})...`);
-        await sleep(wait);
-        continue;
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      return res;
-    } catch (err) {
-      if (errorRetries < MAX_RETRIES) {
-        errorRetries++;
-        const wait = Math.min(2000 * Math.pow(2, errorRetries), MAX_BACKOFF);
-        console.warn(`  ${err.name === 'AbortError' ? 'Request timeout' : 'Network error'}: ${err.message}. Retrying in ${wait / 1000}s (attempt ${errorRetries}/${MAX_RETRIES})...`);
-        await sleep(wait);
-        continue;
-      }
-      throw err;
-    }
-  }
-}
-
-function extractNutrient(nutrients, id) {
-  const n = nutrients.find((x) => x.nutrientId === id);
-  return n ? Math.round(n.value * 10) / 10 : 0;
-}
+// Data types to include
+const DATA_TYPES = new Set(["sr_legacy_food", "foundation_food", "branded_food"]);
 
 function mapCategory(cat) {
   if (!cat) return "usda";
@@ -103,69 +54,214 @@ function titleCase(str) {
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-/**
- * Compact format — array of arrays to minimize JSON size:
- * [fdcId, name, calories, protein, carbs, fat, serving, servingGrams, category]
- */
-function mapFood(food) {
-  const sg = food.servingSize > 0 ? Math.round(food.servingSize) : 100;
-  const unit = (food.servingSizeUnit || "g").toLowerCase();
-  const serving = unit === "ml" ? `${sg}ml` : `${sg}g`;
-  const scale = sg / 100;
-
-  return [
-    food.fdcId,
-    titleCase(food.description),
-    Math.round(extractNutrient(food.foodNutrients, ENERGY) * scale),
-    Math.round(extractNutrient(food.foodNutrients, PROTEIN) * scale * 10) / 10,
-    Math.round(extractNutrient(food.foodNutrients, CARBS) * scale * 10) / 10,
-    Math.round(extractNutrient(food.foodNutrients, FAT) * scale * 10) / 10,
-    serving,
-    sg,
-    mapCategory(food.foodCategory),
-  ];
+/** Parse a CSV line handling quoted fields with commas inside */
+function parseCSVLine(line) {
+  const fields = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ",") {
+        fields.push(current);
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+  }
+  fields.push(current);
+  return fields;
 }
 
-async function fetchPage(dataType, pageNumber) {
-  await sleep(REQUEST_DELAY);
-  const res = await fetchRetry(`${API_BASE}/foods/search?api_key=${API_KEY}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber }),
+/** Stream-read a CSV file, calling fn(row) for each data row */
+async function readCSV(filePath, fn) {
+  const rl = createInterface({
+    input: createReadStream(filePath, "utf8"),
+    crlfDelay: Infinity,
   });
-  const data = await res.json();
-  if (!data || !Array.isArray(data.foods)) {
-    throw new Error(`Unexpected API response for ${dataType} page ${pageNumber}: ${JSON.stringify(data).slice(0, 200)}`);
+  let headers = null;
+  for await (const line of rl) {
+    if (!headers) {
+      headers = parseCSVLine(line).map((h) => h.replace(/^\uFEFF/, "").trim());
+      continue;
+    }
+    const fields = parseCSVLine(line);
+    const row = {};
+    for (let i = 0; i < headers.length; i++) {
+      row[headers[i]] = fields[i] || "";
+    }
+    fn(row);
   }
-  return data;
+}
+
+/** Find a file recursively in a directory */
+function findFile(dir, name) {
+  try {
+    const result = execSync(`find "${dir}" -name "${name}" -type f`, {
+      encoding: "utf8",
+    }).trim().split("\n")[0];
+    return result || null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
-  const allFoods = [];
   const startTime = Date.now();
 
-  for (const dataType of DATA_TYPES) {
-    // Get count
-    const probe = await fetchPage(dataType, 1);
-    const totalHits = probe.totalHits;
-    const totalPages = Math.ceil(totalHits / PAGE_SIZE);
-    console.log(`\n${dataType}: ${totalHits.toLocaleString()} foods (${totalPages} pages)`);
+  // Setup temp directory
+  mkdirSync(TEMP_DIR, { recursive: true });
 
-    // Store first page
-    allFoods.push(...probe.foods.map(mapFood));
-    process.stdout.write(`  Page 1/${totalPages} (${allFoods.length.toLocaleString()} total)\r`);
+  const zipPath = join(TEMP_DIR, "usda-full.zip");
+  const extractDir = join(TEMP_DIR, "extracted");
 
-    // Remaining pages
-    for (let page = 2; page <= totalPages; page++) {
-      const data = await fetchPage(dataType, page);
-      allFoods.push(...data.foods.map(mapFood));
-      process.stdout.write(`  Page ${page}/${totalPages} (${allFoods.length.toLocaleString()} total)\r`);
+  // Download full CSV zip
+  console.log("Downloading USDA FoodData Central bulk CSV...");
+  let downloaded = false;
+  for (const date of RELEASE_DATES) {
+    const url = `${BASE_URL}/FoodData_Central_csv_${date}.zip`;
+    console.log(`  Trying ${url}...`);
+    try {
+      execSync(
+        `curl -fSL --retry 3 --retry-delay 5 -o "${zipPath}" "${url}"`,
+        { stdio: "inherit", timeout: 600_000 }
+      );
+      downloaded = true;
+      console.log(`  Downloaded successfully.`);
+      break;
+    } catch (err) {
+      console.warn(`  Failed for date ${date}, trying next...`);
     }
-    console.log(`  Done — ${allFoods.length.toLocaleString()} total foods so far`);
+  }
+  if (!downloaded) {
+    throw new Error("Could not download USDA data for any release date");
+  }
+
+  // Extract
+  console.log("Extracting ZIP...");
+  mkdirSync(extractDir, { recursive: true });
+  execSync(`unzip -o "${zipPath}" -d "${extractDir}"`, {
+    stdio: "inherit",
+    timeout: 300_000,
+  });
+  console.log("Extracted.");
+
+  // Find the directory containing CSV files
+  const foodCsvPath = findFile(extractDir, "food.csv");
+  if (!foodCsvPath) throw new Error("Could not find food.csv in extracted data");
+  const csvDir = dirname(foodCsvPath);
+  console.log(`CSV directory: ${csvDir}`);
+
+  // 1. Read food categories
+  console.log("\n1. Reading food categories...");
+  const categories = {}; // id -> description
+  const catFile = findFile(csvDir, "food_category.csv");
+  if (catFile) {
+    await readCSV(catFile, (row) => {
+      categories[row.id] = row.description;
+    });
+    console.log(`   ${Object.keys(categories).length} categories`);
+  } else {
+    console.warn("   food_category.csv not found, using default categories");
+  }
+
+  // 2. Read foods (filter to our data types)
+  console.log("2. Reading foods...");
+  const foods = {}; // fdc_id -> { description, dataType, categoryId }
+  await readCSV(foodCsvPath, (row) => {
+    if (DATA_TYPES.has(row.data_type)) {
+      foods[row.fdc_id] = {
+        description: row.description,
+        dataType: row.data_type,
+        categoryId: row.food_category_id,
+      };
+    }
+  });
+  console.log(`   ${Object.keys(foods).length} foods`);
+
+  // 3. Read branded_food for serving sizes
+  console.log("3. Reading branded food serving sizes...");
+  const servings = {}; // fdc_id -> { size, unit }
+  const brandedFile = findFile(csvDir, "branded_food.csv");
+  if (brandedFile) {
+    await readCSV(brandedFile, (row) => {
+      if (row.serving_size && parseFloat(row.serving_size) > 0) {
+        servings[row.fdc_id] = {
+          size: parseFloat(row.serving_size),
+          unit: (row.serving_size_unit || "g").toLowerCase(),
+        };
+      }
+    });
+    console.log(`   ${Object.keys(servings).length} serving sizes`);
+  } else {
+    console.warn("   branded_food.csv not found, using defaults");
+  }
+
+  // 4. Read nutrients (only the 4 we care about, only for our foods)
+  console.log("4. Reading food nutrients (largest file, may take a few minutes)...");
+  const nutrients = {}; // fdc_id -> { 1008: cal, 1003: protein, ... }
+  let nutrientCount = 0;
+  const nutrientFile = findFile(csvDir, "food_nutrient.csv");
+  if (!nutrientFile) throw new Error("food_nutrient.csv not found");
+  await readCSV(nutrientFile, (row) => {
+    const nutrientId = parseInt(row.nutrient_id);
+    if (!NUTRIENT_IDS.has(nutrientId)) return;
+    const fdcId = row.fdc_id;
+    if (!foods[fdcId]) return; // skip foods we don't care about
+    if (!nutrients[fdcId]) nutrients[fdcId] = {};
+    nutrients[fdcId][nutrientId] = parseFloat(row.amount) || 0;
+    nutrientCount++;
+    if (nutrientCount % 500_000 === 0) {
+      console.log(`   ${(nutrientCount / 1_000_000).toFixed(1)}M nutrient rows matched...`);
+    }
+  });
+  console.log(`   ${nutrientCount.toLocaleString()} nutrient values loaded`);
+
+  // 5. Build compact output
+  console.log("\n5. Building output...");
+  const allFoods = [];
+  for (const [fdcId, food] of Object.entries(foods)) {
+    const n = nutrients[fdcId] || {};
+    const cal100 = n[ENERGY] || 0;
+    const pro100 = n[PROTEIN] || 0;
+    const carb100 = n[CARBS] || 0;
+    const fat100 = n[FAT] || 0;
+
+    const srv = servings[fdcId];
+    const sg = srv ? Math.round(srv.size) : 100;
+    const unit = srv ? srv.unit : "g";
+    const serving = unit === "ml" ? `${sg}ml` : `${sg}g`;
+    const scale = sg / 100;
+
+    const catDesc = categories[food.categoryId] || "";
+
+    allFoods.push([
+      parseInt(fdcId),
+      titleCase(food.description),
+      Math.round(cal100 * scale),
+      Math.round(pro100 * scale * 10) / 10,
+      Math.round(carb100 * scale * 10) / 10,
+      Math.round(fat100 * scale * 10) / 10,
+      serving,
+      sg,
+      mapCategory(catDesc),
+    ]);
   }
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-  console.log(`\nDownloaded ${allFoods.length.toLocaleString()} foods in ${elapsed} minutes`);
+  console.log(`Processed ${allFoods.length.toLocaleString()} foods in ${elapsed} minutes`);
 
   // Write compact JSON
   mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
@@ -175,9 +271,15 @@ async function main() {
   const sizeMB = (Buffer.byteLength(output) / 1024 / 1024).toFixed(1);
   console.log(`Written to ${OUTPUT_PATH} (${sizeMB} MB)`);
   console.log("Vercel will serve this gzip/brotli compressed (~5-8 MB over the wire)");
+
+  // Cleanup temp files
+  console.log("Cleaning up temp files...");
+  rmSync(TEMP_DIR, { recursive: true, force: true });
+  console.log("Done!");
 }
 
 main().catch((err) => {
   console.error("Fatal error:", err);
+  try { rmSync(TEMP_DIR, { recursive: true, force: true }); } catch {}
   process.exit(1);
 });

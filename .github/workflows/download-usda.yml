@@ -6,7 +6,7 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 # 3 hour limit (download takes ~2 hrs)
+    timeout-minutes: 30 # Bulk CSV download + parse takes ~5-10 min
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +15,7 @@ jobs:
           node-version: 20
 
       - name: Download USDA foods
-        run: USDA_API_KEY=${{ secrets.USDA_API_KEY }} node scripts/download-usda.mjs
+        run: node scripts/download-usda.mjs
 
       - name: Commit and push
         run: |
