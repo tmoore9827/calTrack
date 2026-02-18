@@ -28,7 +28,10 @@ const DATA_TYPES = ["SR Legacy", "Foundation", "Branded"];
 const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
 
 const RATE_LIMIT_WAIT = 62_000; // 62s wait on 429
-const MAX_RETRIES = 10;
+const MAX_RETRIES = 15;
+const MAX_BACKOFF = 30_000; // Cap backoff at 30s
+const REQUEST_DELAY = 150; // 150ms between requests to avoid rate limits
+const FETCH_TIMEOUT = 60_000; // 60s timeout per request
 
 if (API_KEY === "DEMO_KEY") {
   console.warn("WARNING: Using DEMO_KEY (30 req/hr). This will take ~67 hours.");
@@ -42,15 +45,18 @@ function sleep(ms) {
 async function fetchRetry(url, init) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, init);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
       if (res.status === 429) {
         console.warn(`  Rate limited (429). Waiting ${RATE_LIMIT_WAIT / 1000}s...`);
         await sleep(RATE_LIMIT_WAIT);
         continue;
       }
       if (res.status >= 500 && attempt < MAX_RETRIES) {
-        const wait = 2000 * Math.pow(2, attempt);
-        console.warn(`  Server error ${res.status}. Retrying in ${wait}ms...`);
+        const wait = Math.min(2000 * Math.pow(2, attempt), MAX_BACKOFF);
+        console.warn(`  Server error ${res.status}. Retrying in ${wait / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(wait);
         continue;
       }
@@ -58,8 +64,8 @@ async function fetchRetry(url, init) {
       return res;
     } catch (err) {
       if (attempt < MAX_RETRIES) {
-        const wait = 2000 * Math.pow(2, attempt);
-        console.warn(`  Network error: ${err.message}. Retrying in ${wait}ms...`);
+        const wait = Math.min(2000 * Math.pow(2, attempt), MAX_BACKOFF);
+        console.warn(`  ${err.name === 'AbortError' ? 'Request timeout' : 'Network error'}: ${err.message}. Retrying in ${wait / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
         await sleep(wait);
         continue;
       }
@@ -118,12 +124,17 @@ function mapFood(food) {
 }
 
 async function fetchPage(dataType, pageNumber) {
+  await sleep(REQUEST_DELAY);
   const res = await fetchRetry(`${API_BASE}/foods/search?api_key=${API_KEY}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query: "", dataType: [dataType], pageSize: PAGE_SIZE, pageNumber }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!data || !Array.isArray(data.foods)) {
+    throw new Error(`Unexpected API response for ${dataType} page ${pageNumber}: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  return data;
 }
 
 async function main() {
