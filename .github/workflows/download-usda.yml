@@ -3,6 +3,9 @@ name: Download USDA Database
 on:
   workflow_dispatch: # Manual trigger from GitHub Actions tab
 
+permissions:
+  contents: write
+
 jobs:
   download:
     runs-on: ubuntu-latest
