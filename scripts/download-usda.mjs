@@ -4,7 +4,7 @@
  * and output a compact JSON file for serving as a static asset.
  *
  * Downloads individual dataset CSVs (no API key needed) instead of paginated API calls.
- * This avoids all rate limiting issues and completes in ~5-10 minutes.
+ * Uses awk pre-filtering on the massive nutrient CSV to avoid memory issues.
  *
  * Usage:
  *   node scripts/download-usda.mjs
@@ -32,7 +32,8 @@ const DATASETS = [
 
 // Nutrient IDs we care about
 const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
-const NUTRIENT_IDS = new Set([ENERGY, PROTEIN, FAT, CARBS]);
+const NUTRIENT_IDS = [ENERGY, PROTEIN, FAT, CARBS];
+const NUTRIENT_SET = new Set(NUTRIENT_IDS);
 
 function mapCategory(cat) {
   if (!cat) return "usda";
@@ -122,22 +123,33 @@ function findFile(dir, name) {
   }
 }
 
-/** List directory contents for debugging */
-function listDir(dir, depth = 0) {
-  try {
-    const entries = readdirSync(dir);
-    for (const entry of entries) {
-      const fullPath = join(dir, entry);
-      const stat = statSync(fullPath);
-      console.log(`${"  ".repeat(depth)}${stat.isDirectory() ? "[DIR]" : ""} ${entry}`);
-      if (stat.isDirectory() && depth < 2) {
-        listDir(fullPath, depth + 1);
-      }
-    }
-  } catch {}
+/**
+ * Pre-filter food_nutrient.csv using awk to only keep our 4 nutrient IDs.
+ * This reduces ~60M rows to ~1.6M rows, preventing OOM when parsing in Node.
+ */
+function prefilterNutrientCSV(inputPath, outputPath) {
+  // Find the column index for nutrient_id (awk is 1-indexed)
+  const header = execSync(`head -1 "${inputPath}"`, { encoding: "utf8" }).trim();
+  const cols = header.replace(/^\uFEFF/, "").split(",").map((h) => h.replace(/"/g, "").trim());
+  const nutrientColIdx = cols.indexOf("nutrient_id") + 1; // awk 1-indexed
+
+  if (nutrientColIdx === 0) {
+    throw new Error(`nutrient_id column not found in ${inputPath}. Headers: ${cols.join(", ")}`);
+  }
+
+  console.log(`  Pre-filtering nutrient CSV (column ${nutrientColIdx})...`);
+  const ids = NUTRIENT_IDS.join("|");
+  execSync(
+    `head -1 "${inputPath}" > "${outputPath}" && awk -F',' '$${nutrientColIdx} ~ /^"?(${ids})"?$/' "${inputPath}" >> "${outputPath}"`,
+    { timeout: 300_000, maxBuffer: 10 * 1024 * 1024 }
+  );
+
+  const origSize = (statSync(inputPath).size / 1024 / 1024).toFixed(1);
+  const filtSize = (statSync(outputPath).size / 1024 / 1024).toFixed(1);
+  console.log(`  Filtered: ${origSize} MB → ${filtSize} MB`);
 }
 
-/** Download a dataset zip, extract it, return the CSV directory path */
+/** Download a dataset zip, extract it */
 function downloadAndExtract(file, extractDir) {
   const url = `${BASE_URL}/${file}`;
   const zipPath = join(TEMP_DIR, file);
@@ -159,12 +171,7 @@ function downloadAndExtract(file, extractDir) {
 
   // Delete zip to save disk space
   rmSync(zipPath, { force: true });
-
-  // Debug: show extracted contents
-  console.log("  Extracted contents:");
-  listDir(extractDir, 1);
-
-  return extractDir;
+  console.log("  Extracted.");
 }
 
 async function main() {
@@ -178,6 +185,7 @@ async function main() {
   // Process each dataset
   for (const dataset of DATASETS) {
     console.log(`\n=== ${dataset.name} ===`);
+    const datasetStart = Date.now();
 
     const extractDir = join(TEMP_DIR, dataset.dataType);
     downloadAndExtract(dataset.file, extractDir);
@@ -185,12 +193,9 @@ async function main() {
     // Find CSV files
     const foodCsv = findFile(extractDir, "food.csv");
     if (!foodCsv) {
-      console.error("  Could not find food.csv! Directory contents:");
-      listDir(extractDir);
       throw new Error(`food.csv not found for ${dataset.name}`);
     }
     const csvDir = dirname(foodCsv);
-    console.log(`  CSV directory: ${csvDir}`);
 
     // Read food categories (if available)
     const categories = {};
@@ -203,6 +208,7 @@ async function main() {
     }
 
     // Read foods
+    console.log("  Reading foods...");
     const foods = {};
     const foodCount = await readCSV(foodCsv, (row) => {
       foods[row.fdc_id] = {
@@ -217,6 +223,7 @@ async function main() {
     if (dataset.dataType === "branded_food") {
       const brandedFile = findFile(csvDir, "branded_food.csv");
       if (brandedFile) {
+        console.log("  Reading serving sizes...");
         await readCSV(brandedFile, (row) => {
           if (row.serving_size && parseFloat(row.serving_size) > 0) {
             servings[row.fdc_id] = {
@@ -229,14 +236,20 @@ async function main() {
       }
     }
 
-    // Read nutrients (only the 4 we need, only for our foods)
-    const nutrients = {};
-    let nutrientMatches = 0;
+    // Pre-filter the nutrient CSV to only our 4 nutrient IDs (reduces ~60M to ~1.6M rows)
     const nutrientFile = findFile(csvDir, "food_nutrient.csv");
     if (!nutrientFile) throw new Error(`food_nutrient.csv not found for ${dataset.name}`);
-    await readCSV(nutrientFile, (row) => {
+
+    const filteredPath = join(TEMP_DIR, `${dataset.dataType}_nutrients_filtered.csv`);
+    prefilterNutrientCSV(nutrientFile, filteredPath);
+
+    // Now read the much smaller filtered nutrient file
+    console.log("  Reading filtered nutrients...");
+    const nutrients = {};
+    let nutrientMatches = 0;
+    await readCSV(filteredPath, (row) => {
       const nutrientId = parseInt(row.nutrient_id);
-      if (!NUTRIENT_IDS.has(nutrientId)) return;
+      if (!NUTRIENT_SET.has(nutrientId)) return;
       const fdcId = row.fdc_id;
       if (!foods[fdcId]) return;
       if (!nutrients[fdcId]) nutrients[fdcId] = {};
@@ -244,6 +257,9 @@ async function main() {
       nutrientMatches++;
     });
     console.log(`  ${nutrientMatches.toLocaleString()} nutrient values matched`);
+
+    // Cleanup filtered file
+    rmSync(filteredPath, { force: true });
 
     // Build output for this dataset
     let datasetCount = 0;
@@ -275,9 +291,11 @@ async function main() {
       ]);
       datasetCount++;
     }
-    console.log(`  Added ${datasetCount.toLocaleString()} foods (${allFoods.length.toLocaleString()} total)`);
 
-    // Cleanup this dataset's extracted files to save memory/disk
+    const dsElapsed = ((Date.now() - datasetStart) / 1000).toFixed(0);
+    console.log(`  Added ${datasetCount.toLocaleString()} foods in ${dsElapsed}s (${allFoods.length.toLocaleString()} total)`);
+
+    // Cleanup this dataset's extracted files to save disk
     rmSync(extractDir, { recursive: true, force: true });
   }
 

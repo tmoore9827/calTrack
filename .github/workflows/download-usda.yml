@@ -15,7 +15,7 @@ jobs:
           node-version: 20
 
       - name: Download USDA foods
-        run: node --max-old-space-size=6144 scripts/download-usda.mjs
+        run: node --max-old-space-size=4096 scripts/download-usda.mjs
 
       - name: Commit and push
         run: |
