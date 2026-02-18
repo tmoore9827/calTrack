@@ -12,7 +12,7 @@
  * Output: public/data/usda-foods.json (~30-40MB, serves compressed via CDN)
  */
 
-import { writeFileSync } from "fs";
+import { writeFileSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -165,6 +165,7 @@ async function main() {
   console.log(`\nDownloaded ${allFoods.length.toLocaleString()} foods in ${elapsed} minutes`);
 
   // Write compact JSON
+  mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
   const output = JSON.stringify({ v: 2, foods: allFoods });
   writeFileSync(OUTPUT_PATH, output);
 
