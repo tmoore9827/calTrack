@@ -12,6 +12,8 @@ jobs:
     timeout-minutes: 30 # Bulk CSV download + parse takes ~5-10 min
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
@@ -22,9 +24,11 @@ jobs:
 
       - name: Check output size
         run: |
-          ls -lh public/data/usda-foods.json
-          SIZE=$(wc -c < public/data/usda-foods.json)
+          FILE="public/data/usda-foods.json"
+          ls -lh "$FILE"
+          SIZE=$(wc -c < "$FILE")
           echo "File size: $SIZE bytes ($((SIZE / 1024 / 1024)) MB)"
+          echo "file_size=$SIZE" >> "$GITHUB_OUTPUT"
           if [ "$SIZE" -gt 95000000 ]; then
             echo "::error::File exceeds 95MB — GitHub will reject this on push (100MB limit)"
             exit 1
@@ -41,8 +45,26 @@ jobs:
           path: public/data/usda-foods.json
           retention-days: 7
 
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Commit and push
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "data: add pre-built USDA food database"
-          file_pattern: "public/data/usda-foods.json"
+        run: |
+          set -x
+          echo "=== Git status ==="
+          git status
+          echo "=== Adding file ==="
+          git add public/data/usda-foods.json
+          echo "=== Git status after add ==="
+          git status
+          echo "=== Committing ==="
+          git commit -m "data: add pre-built USDA food database" || { echo "Nothing to commit"; exit 0; }
+          echo "=== Current branch ==="
+          git branch -v
+          echo "=== Remote ==="
+          git remote -v
+          echo "=== Pushing with verbose ==="
+          GIT_TRACE=1 git push origin HEAD 2>&1
+          echo "=== Push complete ==="
