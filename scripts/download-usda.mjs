@@ -33,24 +33,54 @@ const ENERGY = 1008, PROTEIN = 1003, FAT = 1004, CARBS = 1005;
 const NUTRIENT_IDS = [ENERGY, PROTEIN, FAT, CARBS];
 const NUTRIENT_SET = new Set(NUTRIENT_IDS);
 
+const MAX_NAME_LENGTH = 80;
+const MAX_FILE_SIZE_MB = 90; // warn if approaching GitHub's 100MB limit
+
+// Single-char category codes to save space (expanded client-side)
 function mapCategory(cat) {
-  if (!cat) return "usda";
+  if (!cat) return "u";
   const c = cat.toLowerCase();
-  if (/poultry|beef|pork|lamb|fish|seafood|meat/.test(c)) return "protein";
-  if (/dairy|cheese|milk|yogurt/.test(c)) return "dairy";
-  if (/cereal|grain|bread|pasta|baked|rice/.test(c)) return "grain";
-  if (/fruit/.test(c)) return "fruit";
-  if (/vegetable|legume/.test(c)) return "vegetable";
-  if (/nut|seed/.test(c)) return "snack";
-  if (/beverage/.test(c)) return "beverage";
-  if (/bean|pea|lentil/.test(c)) return "legume";
-  if (/restaurant|fast food/.test(c)) return "restaurant";
-  return "usda";
+  if (/poultry|beef|pork|lamb|fish|seafood|meat/.test(c)) return "p";
+  if (/dairy|cheese|milk|yogurt/.test(c)) return "d";
+  if (/cereal|grain|bread|pasta|baked|rice/.test(c)) return "g";
+  if (/fruit/.test(c)) return "f";
+  if (/vegetable|legume/.test(c)) return "v";
+  if (/nut|seed/.test(c)) return "s";
+  if (/beverage/.test(c)) return "b";
+  if (/bean|pea|lentil/.test(c)) return "l";
+  if (/restaurant|fast food/.test(c)) return "r";
+  return "u";
 }
 
-function titleCase(str) {
-  return str.toLowerCase().split(/[\s,]+/).filter(Boolean)
+// Category code → full name mapping (for client-side expansion)
+const CATEGORY_MAP = {
+  p: "protein", d: "dairy", g: "grain", f: "fruit",
+  v: "vegetable", s: "snack", b: "beverage", l: "legume",
+  r: "restaurant", u: "usda",
+};
+
+/**
+ * Clean up food name: title-case, remove redundant brand prefixes,
+ * and truncate to MAX_NAME_LENGTH.
+ */
+function cleanName(str) {
+  // Title case
+  let name = str.toLowerCase().split(/[\s,]+/).filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  // Remove redundant brand prefix: "Brand Brand Product" → "Brand Product"
+  const words = name.split(" ");
+  if (words.length >= 3) {
+    const first = words[0].toLowerCase();
+    const second = words[1].toLowerCase();
+    if (first === second) {
+      name = words.slice(1).join(" ");
+    }
+  }
+  // Truncate
+  if (name.length > MAX_NAME_LENGTH) {
+    name = name.slice(0, MAX_NAME_LENGTH - 1) + "…";
+  }
+  return name;
 }
 
 /** Parse a CSV line handling quoted fields with commas inside */
@@ -180,8 +210,9 @@ async function main() {
   mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
 
   // Open output stream — write JSON header, then stream entries
+  // v3: single-char category codes, integer macros, truncated names
   const out = createWriteStream(OUTPUT_PATH, "utf8");
-  out.write('{"v":2,"foods":[');
+  out.write('{"v":3,"categoryMap":' + JSON.stringify(CATEGORY_MAP) + ',"foods":[');
   let firstEntry = true;
 
   for (const dataset of DATASETS) {
@@ -264,6 +295,9 @@ async function main() {
 
       const cal100 = n[0], pro100 = n[1], fat100 = n[2], carb100 = n[3];
 
+      // Skip foods with 0 calories — not useful for calorie tracking
+      if (cal100 <= 0) return;
+
       const srv = servings.get(fdcId);
       const sg = srv ? Math.round(srv[0]) : 100;
       const unit = srv ? srv[1] : "g";
@@ -272,13 +306,14 @@ async function main() {
 
       const catDesc = categories.get(fields[idx.food_category_id]) || "";
 
+      // Use integers for macros (saves ~3-5 bytes per entry vs decimals)
       const entry = JSON.stringify([
         parseInt(fdcId),
-        titleCase(fields[idx.description]),
+        cleanName(fields[idx.description]),
         Math.round(cal100 * scale),
-        Math.round(pro100 * scale * 10) / 10,
-        Math.round(carb100 * scale * 10) / 10,
-        Math.round(fat100 * scale * 10) / 10,
+        Math.round(pro100 * scale),
+        Math.round(carb100 * scale),
+        Math.round(fat100 * scale),
         serving,
         sg,
         mapCategory(catDesc),
@@ -309,10 +344,17 @@ async function main() {
   });
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-  const sizeMB = (statSync(OUTPUT_PATH).size / 1024 / 1024).toFixed(1);
+  const sizeBytes = statSync(OUTPUT_PATH).size;
+  const sizeMB = (sizeBytes / 1024 / 1024).toFixed(1);
   console.log(`\nProcessed ${totalFoods.toLocaleString()} foods in ${elapsed} minutes`);
   console.log(`Written to ${OUTPUT_PATH} (${sizeMB} MB)`);
   console.log("Vercel will serve this gzip/brotli compressed (~5-8 MB over the wire)");
+
+  if (sizeBytes > MAX_FILE_SIZE_MB * 1024 * 1024) {
+    console.error(`\nERROR: File size ${sizeMB} MB exceeds ${MAX_FILE_SIZE_MB} MB limit!`);
+    console.error("GitHub rejects files over 100MB. Consider further trimming.");
+    process.exit(1);
+  }
 
   rmSync(TEMP_DIR, { recursive: true, force: true });
   console.log("Done!");

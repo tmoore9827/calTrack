@@ -12,7 +12,7 @@ const META_STORE = "meta";
 
 // Bump this when the static data file is regenerated
 // so existing users automatically re-sync from the new file
-export const SYNC_VERSION = 2;
+export const SYNC_VERSION = 3;
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {

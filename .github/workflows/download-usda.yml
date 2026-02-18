@@ -20,10 +20,18 @@ jobs:
       - name: Download USDA foods
         run: node --max-old-space-size=2048 scripts/download-usda.mjs
 
-      - name: Check output
+      - name: Check output size
         run: |
           ls -lh public/data/usda-foods.json
-          wc -c < public/data/usda-foods.json
+          SIZE=$(wc -c < public/data/usda-foods.json)
+          echo "File size: $SIZE bytes ($((SIZE / 1024 / 1024)) MB)"
+          if [ "$SIZE" -gt 95000000 ]; then
+            echo "::error::File exceeds 95MB — GitHub will reject this on push (100MB limit)"
+            exit 1
+          fi
+          if [ "$SIZE" -gt 50000000 ]; then
+            echo "::warning::File exceeds 50MB — consider further trimming"
+          fi
 
       - name: Upload artifact (backup)
         if: always()
@@ -36,5 +44,5 @@ jobs:
       - name: Commit and push
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Add pre-built USDA food database (400K+ foods)"
+          commit_message: "data: add pre-built USDA food database"
           file_pattern: "public/data/usda-foods.json"

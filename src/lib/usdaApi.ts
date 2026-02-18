@@ -19,7 +19,16 @@ export interface SyncProgress {
 
 type CompactFood = [number, string, number, number, number, number, string, number, string];
 
-function expandFood(row: CompactFood): UsdaStoredFood {
+// Category code expansion for v3 format (single-char codes → full names)
+const DEFAULT_CATEGORY_MAP: Record<string, string> = {
+  p: "protein", d: "dairy", g: "grain", f: "fruit",
+  v: "vegetable", s: "snack", b: "beverage", l: "legume",
+  r: "restaurant", u: "usda",
+};
+
+function expandFood(row: CompactFood, categoryMap?: Record<string, string>): UsdaStoredFood {
+  const rawCategory = row[8];
+  const category = categoryMap?.[rawCategory] ?? rawCategory;
   return {
     fdcId: row[0],
     name: row[1],
@@ -30,7 +39,7 @@ function expandFood(row: CompactFood): UsdaStoredFood {
     fat: row[5],
     serving: row[6],
     servingGrams: row[7],
-    category: row[8],
+    category,
   };
 }
 
@@ -54,9 +63,11 @@ export async function syncUsdaDatabase(
     throw new Error(`Failed to fetch USDA data: ${res.status} ${res.statusText}`);
   }
 
-  const data: { v: number; foods: CompactFood[] } = await res.json();
+  const data: { v: number; categoryMap?: Record<string, string>; foods: CompactFood[] } = await res.json();
   const total = data.foods.length;
-  console.log(`[USDA Sync] Received ${total.toLocaleString()} foods, storing in IndexedDB...`);
+  // v3 includes a categoryMap for single-char → full-name expansion
+  const catMap = data.categoryMap ?? (data.v >= 3 ? DEFAULT_CATEGORY_MAP : undefined);
+  console.log(`[USDA Sync] Received ${total.toLocaleString()} foods (v${data.v}), storing in IndexedDB...`);
 
   onProgress({ phase: "storing", current: 0, total, message: `Storing ${total.toLocaleString()} foods...` });
 
@@ -65,7 +76,7 @@ export async function syncUsdaDatabase(
   for (let i = 0; i < total; i += STORE_BATCH_SIZE) {
     if (signal?.aborted) throw new Error("Sync cancelled");
 
-    const batch = data.foods.slice(i, i + STORE_BATCH_SIZE).map(expandFood);
+    const batch = data.foods.slice(i, i + STORE_BATCH_SIZE).map(f => expandFood(f, catMap));
     await storeUsdaFoods(batch);
     stored += batch.length;
 
