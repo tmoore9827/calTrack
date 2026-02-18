@@ -22,13 +22,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT_PATH = resolve(__dirname, "../public/data/usda-foods.json");
 const TEMP_DIR = resolve(__dirname, "../.usda-temp");
 
-// Individual dataset download URLs (much smaller than full download)
-const RELEASE_DATES = ["2024-10-31", "2024-04-28"];
+// Individual dataset download URLs (each dataset has its own release date)
 const BASE_URL = "https://fdc.nal.usda.gov/fdc-datasets";
 const DATASETS = [
-  { name: "SR Legacy", slug: "sr_legacy_food", dataType: "sr_legacy_food" },
-  { name: "Foundation", slug: "foundation_food", dataType: "foundation_food" },
-  { name: "Branded", slug: "branded_food", dataType: "branded_food" },
+  { name: "SR Legacy", file: "FoodData_Central_sr_legacy_food_csv_2018-04.zip", dataType: "sr_legacy_food" },
+  { name: "Foundation", file: "FoodData_Central_foundation_food_csv_2024-10-31.zip", dataType: "foundation_food" },
+  { name: "Branded", file: "FoodData_Central_branded_food_csv_2024-10-31.zip", dataType: "branded_food" },
 ];
 
 // Nutrient IDs we care about
@@ -139,9 +138,9 @@ function listDir(dir, depth = 0) {
 }
 
 /** Download a dataset zip, extract it, return the CSV directory path */
-function downloadAndExtract(slug, date, extractDir) {
-  const url = `${BASE_URL}/FoodData_Central_${slug}_csv_${date}.zip`;
-  const zipPath = join(TEMP_DIR, `${slug}.zip`);
+function downloadAndExtract(file, extractDir) {
+  const url = `${BASE_URL}/${file}`;
+  const zipPath = join(TEMP_DIR, file);
 
   console.log(`  Downloading ${url}...`);
   execSync(`curl -fSL --retry 3 --retry-delay 5 -o "${zipPath}" "${url}"`, {
@@ -180,23 +179,8 @@ async function main() {
   for (const dataset of DATASETS) {
     console.log(`\n=== ${dataset.name} ===`);
 
-    const extractDir = join(TEMP_DIR, dataset.slug);
-    let downloaded = false;
-
-    // Try each release date
-    for (const date of RELEASE_DATES) {
-      try {
-        downloadAndExtract(dataset.slug, date, extractDir);
-        downloaded = true;
-        break;
-      } catch (err) {
-        console.warn(`  Failed for date ${date}: ${err.message}`);
-        rmSync(extractDir, { recursive: true, force: true });
-      }
-    }
-    if (!downloaded) {
-      throw new Error(`Could not download ${dataset.name} for any release date`);
-    }
+    const extractDir = join(TEMP_DIR, dataset.dataType);
+    downloadAndExtract(dataset.file, extractDir);
 
     // Find CSV files
     const foodCsv = findFile(extractDir, "food.csv");
